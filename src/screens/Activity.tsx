@@ -163,8 +163,8 @@ export default function Activity() {
               <YAxis tick={tk.tick} {...tk.axisLine} tickFormatter={(v) => usd(Number(v))} width={60} />
               <Tooltip formatter={(v) => usd(Number(v))} {...tk.tooltip} />
               <Legend wrapperStyle={{ fontSize: 11 }} />
-              <Bar dataKey="work" stackId="d" fill={workColor} />
-              <Bar dataKey="overhead" stackId="d" fill={overheadColor} radius={llm ? undefined : [4, 4, 0, 0]} />
+              <Bar dataKey="work" name="work" stackId="d" fill={workColor} />
+              <Bar dataKey="overhead" name="overhead" stackId="d" fill={overheadColor} radius={llm ? undefined : [4, 4, 0, 0]} />
               {llm && <Bar dataKey="unlabelled" name="not labelled" stackId="d" fill={unlabelledColor} radius={[4, 4, 0, 0]} />}
             </BarChart>
           </ResponsiveContainer>

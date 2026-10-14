@@ -46,7 +46,7 @@ export default function Overview() {
             <XAxis dataKey="day" tick={tk.tick} {...tk.axisLine} minTickGap={24} />
             <YAxis tick={tk.tick} {...tk.axisLine} tickFormatter={(v) => usd(Number(v))} width={60} />
             <Tooltip formatter={(v) => usd(Number(v))} {...tk.tooltip} />
-            <Area type="monotone" dataKey="cost_usd" stroke={tk.ramp[0]} strokeWidth={2} fill="url(#ov-cost)" />
+            <Area type="monotone" dataKey="cost_usd" name="Est. cost" stroke={tk.ramp[0]} strokeWidth={2} fill="url(#ov-cost)" />
           </AreaChart>
         </ResponsiveContainer>
       </ChartCard>

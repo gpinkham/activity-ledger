@@ -37,7 +37,7 @@ export default function CostEfficiency() {
             <XAxis dataKey="name" tick={tk.tick} {...tk.axisLine} />
             <YAxis tick={tk.tick} {...tk.axisLine} tickFormatter={(v) => compact(Number(v))} width={50} />
             <Tooltip formatter={(v) => compact(Number(v))} {...tk.tooltip} />
-            <Bar dataKey="value" fill="url(#ce-tokens)" radius={[4, 4, 0, 0]} />
+            <Bar dataKey="value" name="Tokens" fill="url(#ce-tokens)" radius={[4, 4, 0, 0]} />
           </BarChart>
         </ResponsiveContainer>
         <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted">
@@ -68,7 +68,7 @@ export default function CostEfficiency() {
             <XAxis type="number" tick={tk.tick} {...tk.axisLine} tickFormatter={(v) => usd(Number(v))} />
             <YAxis type="category" dataKey="model" tick={tk.tickSmall} {...tk.axisLine} width={140} />
             <Tooltip formatter={(v) => usd(Number(v))} {...tk.tooltip} />
-            <Bar dataKey="cost_usd" fill="url(#ce-model)" radius={[0, 4, 4, 0]} />
+            <Bar dataKey="cost_usd" name="Est. cost" fill="url(#ce-model)" radius={[0, 4, 4, 0]} />
           </BarChart>
         </ResponsiveContainer>
       </ChartCard>
@@ -83,7 +83,7 @@ export default function CostEfficiency() {
             <XAxis type="number" tick={tk.tick} {...tk.axisLine} tickFormatter={(v) => usd(Number(v))} />
             <YAxis type="category" dataKey="project" tick={{ ...tk.tickSmall, fontSize: 9 }} {...tk.axisLine} width={160} />
             <Tooltip formatter={(v) => usd(Number(v))} {...tk.tooltip} />
-            <Bar dataKey="cost_usd" fill="url(#ce-project)" radius={[0, 4, 4, 0]} />
+            <Bar dataKey="cost_usd" name="Est. cost" fill="url(#ce-project)" radius={[0, 4, 4, 0]} />
           </BarChart>
         </ResponsiveContainer>
       </ChartCard>

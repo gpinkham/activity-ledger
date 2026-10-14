@@ -53,7 +53,7 @@ export default function WorkflowScreen() {
             <XAxis type="number" tick={tk.tick} {...tk.axisLine} tickFormatter={(v) => compact(Number(v))} />
             <YAxis type="category" dataKey="tool" tick={tk.tickSmall} {...tk.axisLine} width={160} />
             <Tooltip formatter={(v) => compact(Number(v))} {...tk.tooltip} />
-            <Bar dataKey="count" fill="url(#wf-tool)" radius={[0, 4, 4, 0]} />
+            <Bar dataKey="count" name="Calls" fill="url(#wf-tool)" radius={[0, 4, 4, 0]} />
           </BarChart>
         </ResponsiveContainer>
       </ChartCard>

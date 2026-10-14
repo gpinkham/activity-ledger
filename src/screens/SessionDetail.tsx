@@ -73,7 +73,7 @@ export default function SessionDetail({ sessionId }: { sessionId: string }) {
               <XAxis dataKey="name" tick={tk.tick} {...tk.axisLine} />
               <YAxis tick={tk.tick} {...tk.axisLine} tickFormatter={(v) => compact(Number(v))} width={50} />
               <Tooltip formatter={(v) => compact(Number(v))} {...tk.tooltip} />
-              <Bar dataKey="value" fill="url(#sd-tokens)" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="value" name="Tokens" fill="url(#sd-tokens)" radius={[4, 4, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </ChartCard>
@@ -86,7 +86,7 @@ export default function SessionDetail({ sessionId }: { sessionId: string }) {
               <XAxis type="number" tick={tk.tick} {...tk.axisLine} tickFormatter={(v) => usd(Number(v))} />
               <YAxis type="category" dataKey="model" tick={tk.tickSmall} {...tk.axisLine} width={140} />
               <Tooltip formatter={(v) => usd(Number(v))} {...tk.tooltip} />
-              <Bar dataKey="cost_usd" fill="url(#sd-model)" radius={[0, 4, 4, 0]} />
+              <Bar dataKey="cost_usd" name="Est. cost" fill="url(#sd-model)" radius={[0, 4, 4, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </ChartCard>
