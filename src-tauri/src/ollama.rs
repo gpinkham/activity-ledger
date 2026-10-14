@@ -167,12 +167,26 @@ pub fn post_json(ep: &Endpoint, path: &str, body: &str, timeout: Duration) -> Re
     String::from_utf8(out).map_err(|_| "response is not UTF-8".to_string())
 }
 
+/// How much of a bad answer to quote in the error.
+const ANSWER_EXCERPT_CHARS: usize = 120;
+
 /// Ask the model for one label. Ok only for a label in MODEL_LABELS.
+///
+/// Thinking is turned off (`think: false`): a thinking model such as qwen3
+/// otherwise spends the few answer tokens on its reasoning and returns no
+/// answer. The answer is constrained by a JSON schema (Ollama's structured
+/// outputs) to one of the labels, which small models need. The answer is still
+/// read leniently, since older Ollama versions may ignore either setting.
 pub fn chat_label(ep: &Endpoint, model: &str, user: &str, num_ctx: i64, timeout: Duration) -> Result<String, String> {
     let body = json!({
         "model": model,
         "stream": false,
-        "format": "json",
+        "think": false,
+        "format": {
+            "type": "object",
+            "properties": { "label": { "type": "string", "enum": MODEL_LABELS } },
+            "required": ["label"],
+        },
         "options": { "num_ctx": num_ctx, "num_predict": 64, "temperature": 0 },
         "messages": [
             { "role": "system", "content": SYSTEM_PROMPT },
@@ -182,10 +196,43 @@ pub fn chat_label(ep: &Endpoint, model: &str, user: &str, num_ctx: i64, timeout:
     .to_string();
     let resp = post_json(ep, "/api/chat", &body, timeout)?;
     let v: Value = serde_json::from_str(&resp).map_err(|_| "response is not JSON".to_string())?;
-    let content = v.pointer("/message/content").and_then(|c| c.as_str()).ok_or("no message in the response")?;
-    let answer: Value = serde_json::from_str(content.trim()).map_err(|_| "the model did not answer JSON".to_string())?;
-    let label = answer.get("label").and_then(|l| l.as_str()).map(|l| l.trim().to_lowercase()).ok_or("no label in the answer")?;
+    let message = v.get("message").ok_or("no message in the response")?;
+    let content = message.get("content").and_then(|c| c.as_str()).unwrap_or("");
+    let thought = message.get("thinking").and_then(|t| t.as_str()).is_some_and(|t| !t.trim().is_empty());
+    let label = parse_label(content, thought)?;
     if MODEL_LABELS.contains(&label.as_str()) { Ok(label) } else { Err(format!("not a known label: {label}")) }
+}
+
+/// The label in a model's answer. Accepts the answer as asked ({"label": ...}),
+/// and also wrapped in a <think> block, a code fence or prose: the first JSON
+/// object with a "label" string wins. The error quotes the start of the answer.
+fn parse_label(content: &str, thought: bool) -> Result<String, String> {
+    let mut text = content.to_string();
+    while let Some(start) = text.find("<think>") {
+        match text[start..].find("</think>") {
+            Some(end) => text.replace_range(start..start + end + "</think>".len(), ""),
+            None => text.truncate(start),
+        }
+    }
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(if thought || content.contains("<think>") {
+            "the model was still thinking and gave no answer (is it a thinking model on an Ollama too old to turn thinking off?)".into()
+        } else {
+            "the model gave an empty answer".into()
+        });
+    }
+    for (i, _) in text.match_indices('{') {
+        let mut objects = serde_json::Deserializer::from_str(&text[i..]).into_iter::<Value>();
+        if let Some(Ok(v)) = objects.next() {
+            if let Some(label) = v.get("label").and_then(|l| l.as_str()) {
+                return Ok(label.trim().to_lowercase());
+            }
+        }
+    }
+    let excerpt: String = text.chars().take(ANSWER_EXCERPT_CHARS).collect();
+    let more = if text.chars().count() > ANSWER_EXCERPT_CHARS { "..." } else { "" };
+    Err(format!("the model did not answer JSON with a label: \"{excerpt}{more}\""))
 }
 
 /// Load the model before the first label, with its own long wait. Ollama loads
@@ -245,6 +292,64 @@ mod tests {
     }
     fn http(code: &str, body: &str) -> String {
         format!("HTTP/1.1 {code}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}", body.len(), body)
+    }
+
+    fn answer(message: Value) -> String {
+        http("200 OK", &json!({"model": "m", "message": message, "done": true}).to_string())
+    }
+
+    #[test]
+    fn the_request_turns_thinking_off_and_constrains_the_answer_to_a_label() {
+        let (url, rx) = fake_seq(vec![(Duration::ZERO, reply("coding"))]);
+        chat_label(&check_url(&url, false).unwrap(), "qwen3:8b", "s", 4096, T).unwrap();
+        let req = rx.recv().unwrap();
+        let body: Value = serde_json::from_str(req.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(body["think"], false, "a thinking model would spend its answer tokens thinking");
+        let schema = &body["format"];
+        assert_eq!(schema["type"], "object", "a JSON schema (structured output), not just \"json\": {schema}");
+        assert_eq!(schema["required"], json!(["label"]));
+        assert_eq!(schema["properties"]["label"]["enum"], json!(MODEL_LABELS));
+    }
+
+    #[test]
+    fn reads_the_label_from_each_shape_a_model_answers_in() {
+        for content in [
+            r#"{"label": "coding"}"#,                                                     // llama2
+            "<think>\nThe segment edits files, so\n</think>\n\n{\"label\": \"coding\"}",   // qwen3, thinking inline
+            "<think>\n\n</think>\n\n{\"label\":\"coding\"}",                               // qwen3, empty think block
+            "```json\n{\"label\": \"coding\"}\n```",                                       // fenced
+            "Here is the label:\n{\"label\": \"coding\"}\nIt edits files.",                // prose around it
+            r#"{"label": " Coding "}"#,                                                   // case and spaces
+            r#"{"reason": "{not json", "x": 1} {"label": "coding"}"#,                     // an earlier object without a label
+        ] {
+            let (url, _rx) = fake_seq(vec![(Duration::ZERO, answer(json!({"role": "assistant", "content": content})))]);
+            assert_eq!(chat_label(&check_url(&url, false).unwrap(), "m", "s", 4096, T), Ok("coding".into()), "{content}");
+        }
+        // Newer Ollama returns a thinking model's reasoning in its own field.
+        let (url, _rx) = fake_seq(vec![(Duration::ZERO, answer(json!({"content": "{\"label\":\"coding\"}", "thinking": "edits files"})))]);
+        assert_eq!(chat_label(&check_url(&url, false).unwrap(), "m", "s", 4096, T).unwrap(), "coding");
+    }
+
+    #[test]
+    fn a_model_that_only_thought_is_told_apart_from_one_that_answered_badly() {
+        let (url, _rx) = fake_seq(vec![(Duration::ZERO, answer(json!({"content": "", "thinking": "Okay, let me look at the tools used"})))]);
+        let err = chat_label(&check_url(&url, false).unwrap(), "qwen3:8b", "s", 4096, T).unwrap_err();
+        assert!(err.contains("thinking") && err.contains("no answer"), "{err}");
+        let (url, _rx) = fake_seq(vec![(Duration::ZERO, answer(json!({"content": "<think>\nOkay, the user wants"})))]);
+        let err = chat_label(&check_url(&url, false).unwrap(), "m", "s", 4096, T).unwrap_err();
+        assert!(err.contains("thinking") && err.contains("no answer"), "an unclosed think block: {err}");
+    }
+
+    #[test]
+    fn a_non_json_answer_quotes_what_the_model_said() {
+        let said = format!("I would say this is coding. {}", "More words. ".repeat(40));
+        let (url, _rx) = fake_seq(vec![(Duration::ZERO, answer(json!({"content": said})))]);
+        let err = chat_label(&check_url(&url, false).unwrap(), "gemma4:e2b", "s", 4096, T).unwrap_err();
+        assert!(err.contains("did not answer JSON") && err.contains("I would say this is coding"), "{err}");
+        assert!(err.len() < 250, "an excerpt, not the whole answer: {}", err.len());
+        let (url, _rx) = fake_seq(vec![(Duration::ZERO, answer(json!({"content": "{\"label\": \"code_review\"}"})))]);
+        let err = chat_label(&check_url(&url, false).unwrap(), "m", "s", 4096, T).unwrap_err();
+        assert!(err.contains("not a known label: code_review"), "{err}");
     }
 
     #[test]

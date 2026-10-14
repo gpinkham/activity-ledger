@@ -38,6 +38,8 @@ Figures are estimates at Anthropic's published API list prices. They are not an 
 
 **An optional local model second.** If you run [Ollama](https://ollama.com), the app can ask your model for a second label for each segment, from a fixed list. You start this yourself with **Label now**. It is off until you do.
 
+The app asks the model for a JSON answer limited to the label list (Ollama's structured outputs) and turns thinking off, so a thinking model answers instead of reasoning. Use Ollama 0.9 or later: older versions cannot turn thinking off. Checked with llama2. The first Label now loads the model, which can take minutes on a Mac without a GPU; the card says "Loading the model" meanwhile.
+
 **A toggle.** On Cost by activity, switch between **Tool labels** and **LLM labels**. The totals are the same in both views. Segments the model has not labelled yet are shown as "not labelled by the model", so nothing is dropped or double counted.
 
 ## Privacy
