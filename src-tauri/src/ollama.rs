@@ -217,6 +217,9 @@ pub fn post_json(ep: &Endpoint, path: &str, body: &str, timeout: Duration) -> Re
     String::from_utf8(out).map_err(|_| "response is not UTF-8".to_string())
 }
 
+/// How much of an answer is searched for the label. A label answer is a few
+/// dozen characters; this bounds the work a huge answer can cause.
+const ANSWER_SCAN_CHARS: usize = 4096;
 /// How much of a bad answer to quote in the error.
 const ANSWER_EXCERPT_CHARS: usize = 120;
 
@@ -255,7 +258,8 @@ pub fn chat_label(ep: &Endpoint, model: &str, user: &str, num_ctx: i64, timeout:
 
 /// The label in a model's answer. Accepts the answer as asked ({"label": ...}),
 /// and also wrapped in a <think> block, a code fence or prose: the first JSON
-/// object with a "label" string wins. The error quotes the start of the answer.
+/// object with a "label" string in the first ANSWER_SCAN_CHARS wins. The error
+/// quotes the start of the answer.
 fn parse_label(content: &str, thought: bool) -> Result<String, String> {
     let mut text = content.to_string();
     while let Some(start) = text.find("<think>") {
@@ -272,8 +276,9 @@ fn parse_label(content: &str, thought: bool) -> Result<String, String> {
             "the model gave an empty answer".into()
         });
     }
-    for (i, _) in text.match_indices('{') {
-        let mut objects = serde_json::Deserializer::from_str(&text[i..]).into_iter::<Value>();
+    let scanned: String = text.chars().take(ANSWER_SCAN_CHARS).collect();
+    for (i, _) in scanned.match_indices('{') {
+        let mut objects = serde_json::Deserializer::from_str(&scanned[i..]).into_iter::<Value>();
         if let Some(Ok(v)) = objects.next() {
             if let Some(label) = v.get("label").and_then(|l| l.as_str()) {
                 return Ok(label.trim().to_lowercase());
@@ -379,6 +384,18 @@ mod tests {
         // Newer Ollama returns a thinking model's reasoning in its own field.
         let (url, _rx) = fake_seq(vec![(Duration::ZERO, answer(json!({"content": "{\"label\":\"coding\"}", "thinking": "edits files"})))]);
         assert_eq!(chat_label(&check_url(&url, false).unwrap(), "m", "s", 4096, T).unwrap(), "coding");
+    }
+
+    #[test]
+    fn only_the_start_of_a_long_answer_is_searched_for_the_label() {
+        // A real answer is at most 64 tokens. A server that sends a huge one is
+        // not searched to its end: a label beyond the first few KB is not found.
+        let content = format!("{}{{\"label\": \"coding\"}}", "{\"x\": [".repeat(ANSWER_SCAN_CHARS));
+        let (url, _rx) = fake_seq(vec![(Duration::ZERO, answer(json!({"content": content})))]);
+        let started = std::time::Instant::now();
+        let err = chat_label(&check_url(&url, false).unwrap(), "m", "s", 4096, T).unwrap_err();
+        assert!(err.contains("did not answer JSON"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]
