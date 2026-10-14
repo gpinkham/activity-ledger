@@ -39,6 +39,7 @@ pub fn run() {
                 price_path,
                 settings_path,
                 label_progress: Mutex::new(labeller::LabelProgress::default()),
+                label_stop: Default::default(),
             });
             Ok(())
         })
@@ -56,6 +57,7 @@ pub fn run() {
             commands::get_settings,
             commands::run_model_labels,
             commands::get_label_progress,
+            commands::stop_model_labels,
             commands::set_settings,
             commands::get_price_table,
             commands::set_price_table,

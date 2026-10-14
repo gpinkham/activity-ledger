@@ -9,7 +9,9 @@
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// The labels the model may answer with. Anything else is rejected.
 pub const MODEL_LABELS: [&str; 10] = [
@@ -27,13 +29,17 @@ pub const LOAD_TIMEOUT: Duration = Duration::from_secs(600);
 /// How long to wait for one label once the model is loaded. Ollama sends nothing
 /// until the answer is ready (no streaming), so this is the whole answer time.
 pub const LABEL_TIMEOUT: Duration = Duration::from_secs(300);
+/// The error when the user pressed Stop.
+pub const STOPPED: &str = "stopped";
+/// How often a waiting request looks at the Stop flag.
+const STOP_POLL: Duration = Duration::from_millis(200);
 /// Connecting is quick or it is not going to happen.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// How much of an error body to show.
 const ERROR_EXCERPT_CHARS: usize = 200;
 pub const SYSTEM_PROMPT: &str = "You label one stretch of AI coding-agent work. Answer with JSON only: {\"label\": \"<one of the labels>\"}. Labels: coding, debugging, code review, triage, research, review / explore, shell / ops, chat / planning, other work, overhead.";
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Endpoint {
     pub host: String,
     pub port: u16,
@@ -42,6 +48,8 @@ pub struct Endpoint {
     /// The user allowed a non-loopback Ollama. When false, post_json also refuses
     /// a resolved address that is not loopback.
     pub remote_ok: bool,
+    /// Set by Stop. A request that is waiting ends within STOP_POLL.
+    pub stop: Arc<AtomicBool>,
 }
 
 /// `localhost`, or a literal loopback IP (127.0.0.0/8, ::1). A name that merely
@@ -76,18 +84,56 @@ pub fn check_url(url: &str, allow_remote: bool) -> Result<Endpoint, String> {
     if !is_loopback_host(&host) && !allow_remote {
         return Err(format!("{host} is not this machine: tick \"Allow a remote Ollama\" to send segment excerpts there"));
     }
-    Ok(Endpoint { host, port, base: path.trim_end_matches('/').to_string(), remote_ok: allow_remote })
+    Ok(Endpoint { host, port, base: path.trim_end_matches('/').to_string(), remote_ok: allow_remote, stop: Arc::default() })
 }
 
 /// An io error as the settings card should show it: a refused connection and a
 /// timeout each say what they mean, since both used to read as "not reachable".
 fn io_error(stage: &str, e: &std::io::Error, ep: &Endpoint, timeout: Duration) -> String {
     use std::io::ErrorKind::*;
+    if e.get_ref().is_some_and(|inner| inner.is::<Stopped>()) {
+        return STOPPED.into();
+    }
     match e.kind() {
         ConnectionRefused => format!("nothing is listening at {}:{} (connection refused). Is Ollama running?", ep.host, ep.port),
         // A read timeout is WouldBlock on macOS and TimedOut on Linux.
         WouldBlock | TimedOut => format!("no answer from Ollama within {} s (timed out while {stage})", timeout.as_secs_f32().round() as u64),
         _ => format!("{stage}: {e}"),
+    }
+}
+
+#[derive(Debug)]
+struct Stopped;
+impl std::fmt::Display for Stopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { f.write_str(STOPPED) }
+}
+impl std::error::Error for Stopped {}
+
+/// The response side of a request: every read shares one deadline, so a server
+/// that sends a byte now and then cannot stretch the wait, and each read waits
+/// at most STOP_POLL before looking at the Stop flag again.
+struct Answer<'a> {
+    stream: TcpStream,
+    deadline: Instant,
+    stop: &'a AtomicBool,
+}
+
+impl Read for Answer<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            if self.stop.load(Ordering::SeqCst) {
+                return Err(std::io::Error::other(Stopped));
+            }
+            let left = self.deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(std::io::ErrorKind::TimedOut.into());
+            }
+            self.stream.set_read_timeout(Some(left.min(STOP_POLL)))?;
+            match self.stream.read(buf) {
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
+                r => return r,
+            }
+        }
     }
 }
 
@@ -104,23 +150,27 @@ fn http_error(code: u16, body: &[u8]) -> String {
 }
 
 /// POST a JSON body and return the response body. Errors on a connect failure,
-/// a timeout (write or read; `timeout` is the wait for the answer), or a
-/// non-2xx status, each with its own message.
+/// a timeout (`timeout` is the whole wait for the answer, however it arrives),
+/// Stop, or a non-2xx status, each with its own message.
 pub fn post_json(ep: &Endpoint, path: &str, body: &str, timeout: Duration) -> Result<String, String> {
     let host = ep.host.trim_start_matches('[').trim_end_matches(']');
     let addr = (host, ep.port).to_socket_addrs().map_err(|e| e.to_string())?.next().ok_or("no address")?;
     if !ep.remote_ok && !addr.ip().is_loopback() {
         return Err(format!("{} resolved to {}, which is not this machine", ep.host, addr.ip()));
     }
-    let mut stream = TcpStream::connect_timeout(&addr, timeout.min(CONNECT_TIMEOUT)).map_err(|e| io_error("connecting", &e, ep, CONNECT_TIMEOUT))?;
-    stream.set_read_timeout(Some(timeout)).ok();
+    if ep.stop.load(Ordering::SeqCst) {
+        return Err(STOPPED.into());
+    }
+    let connect = timeout.min(CONNECT_TIMEOUT);
+    let mut stream = TcpStream::connect_timeout(&addr, connect).map_err(|e| io_error("connecting", &e, ep, connect))?;
+    let deadline = Instant::now() + timeout;
     stream.set_write_timeout(Some(timeout)).ok();
     let req = format!(
         "POST {}{} HTTP/1.1\r\nHost: {}:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         ep.base, path, ep.host, ep.port, body.len(), body
     );
     stream.write_all(req.as_bytes()).map_err(|e| io_error("sending", &e, ep, timeout))?;
-    let mut reader = BufReader::new(stream);
+    let mut reader = BufReader::new(Answer { stream, deadline, stop: &ep.stop });
     let mut status = String::new();
     reader.read_line(&mut status).map_err(|e| io_error("waiting for the answer", &e, ep, timeout))?;
     let code: u16 = status.split_whitespace().nth(1).and_then(|c| c.parse().ok()).ok_or_else(|| format!("bad status line: {}", status.trim()))?;
@@ -246,6 +296,7 @@ pub fn load_model(ep: &Endpoint, model: &str, num_ctx: i64, timeout: Duration) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
     use std::net::TcpListener;
 
     /// A fake Ollama that answers one request with `response` (raw HTTP), or never
@@ -350,6 +401,41 @@ mod tests {
         let (url, _rx) = fake_seq(vec![(Duration::ZERO, answer(json!({"content": "{\"label\": \"code_review\"}"})))]);
         let err = chat_label(&check_url(&url, false).unwrap(), "m", "s", 4096, T).unwrap_err();
         assert!(err.contains("not a known label: code_review"), "{err}");
+    }
+
+    #[test]
+    fn a_server_that_trickles_bytes_cannot_run_past_the_timeout() {
+        // Sends a header byte every 50 ms, forever: no single read waits long.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut s, _)) = listener.accept() {
+                let mut buf = [0u8; 8192];
+                let _ = s.read(&mut buf);
+                let _ = s.write_all(b"HTTP/1.1 200 OK\r\nX-Slow: ");
+                for _ in 0..100 {
+                    if s.write_all(b"a").is_err() { return; }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        });
+        let ep = check_url(&format!("http://127.0.0.1:{port}"), false).unwrap();
+        let started = std::time::Instant::now();
+        let err = post_json(&ep, "/api/chat", "{}", Duration::from_millis(400)).unwrap_err();
+        assert!(err.contains("timed out"), "{err}");
+        assert!(started.elapsed() < Duration::from_millis(1500), "the whole answer has one deadline: {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn stop_ends_a_request_that_is_still_waiting() {
+        let (url, _rx) = fake_seq(vec![(Duration::from_secs(5), reply("coding"))]);
+        let ep = check_url(&url, false).unwrap();
+        let stop = ep.stop.clone();
+        std::thread::spawn(move || { std::thread::sleep(Duration::from_millis(300)); stop.store(true, Ordering::SeqCst); });
+        let started = std::time::Instant::now();
+        let err = load_model(&ep, "m", 4096, Duration::from_secs(10)).unwrap_err();
+        assert_eq!(err, STOPPED);
+        assert!(started.elapsed() < Duration::from_millis(1500), "Stop does not wait for the load: {:?}", started.elapsed());
     }
 
     #[test]

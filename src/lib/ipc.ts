@@ -26,3 +26,4 @@ export const getSettings = () => invoke<AppSettings>("get_settings");
 export const setSettings = (settings: AppSettings) => invoke<void>("set_settings", { settings });
 export const runModelLabels = (filters: Filters) => invoke<void>("run_model_labels", { filters });
 export const getLabelProgress = () => invoke<LabelProgress>("get_label_progress");
+export const stopModelLabels = () => invoke<void>("stop_model_labels");

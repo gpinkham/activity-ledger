@@ -16,6 +16,7 @@ use crate::store::Store;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 thread_local! {
@@ -218,13 +219,16 @@ impl Store {
 /// only to read the jobs and to save each label, never during a request. `load`
 /// asks Ollama to load the model first (ollama::load_model), with a longer wait
 /// than one label gets; it is skipped when there is nothing to label. `send` is
-/// the model call (ollama::chat_label in the app). Returns the final progress.
+/// the model call (ollama::chat_label in the app). `stop` (the Stop button) is
+/// checked before the load and before each label; a request it ends is not
+/// counted as a failure. Returns the final progress.
 pub fn run(
     store: &Mutex<Store>,
     price: &PriceTable,
     f: &Filters,
     settings: &AppSettings,
     progress: &Mutex<LabelProgress>,
+    stop: &AtomicBool,
     load: impl FnOnce() -> Result<(), String>,
     mut send: impl FnMut(&str) -> Result<String, String>,
 ) -> Result<LabelProgress, String> {
@@ -238,10 +242,18 @@ pub fn run(
     let jobs = build_jobs(raw, settings.local_context_limit);
     let set = |p: LabelProgress| { if let Ok(mut g) = progress.lock() { *g = p.clone(); } p };
     let mut p = set(LabelProgress { running: true, total: jobs.len(), loading: !jobs.is_empty(), ..Default::default() });
-    if p.loading {
+    let stopped = |p: &mut LabelProgress| {
+        p.loading = false;
+        p.stopped = Some(format!("Stopped. {} labelled; the rest keep their rule labels.", p.labelled));
+    };
+    if p.loading && stop.load(Ordering::SeqCst) {
+        stopped(&mut p);
+    } else if p.loading {
         let loaded = load();
         p.loading = false;
-        if let Err(e) = loaded {
+        if stop.load(Ordering::SeqCst) {
+            stopped(&mut p);
+        } else if let Err(e) = loaded {
             p.running = false;
             p.stopped = Some(format!("Could not load {model} in Ollama at {}: {e}. Rule labels unchanged.", settings.ollama_url));
             return Ok(set(p));
@@ -250,7 +262,16 @@ pub fn run(
     }
     let mut in_a_row = 0;
     for job in jobs {
-        match send(&job.summary) {
+        if p.stopped.is_some() || stop.load(Ordering::SeqCst) {
+            if p.stopped.is_none() { stopped(&mut p); }
+            break;
+        }
+        let answer = send(&job.summary);
+        if stop.load(Ordering::SeqCst) && answer.is_err() {
+            stopped(&mut p);
+            break;
+        }
+        match answer {
             Ok(label) => {
                 in_a_row = 0;
                 let s = store.lock().map_err(|e| e.to_string())?;
@@ -277,6 +298,7 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
     use crate::parser::parse_str;
     use crate::scanner::ScannedFile;
     use serde_json::json;
@@ -324,7 +346,7 @@ mod tests {
         let store = Mutex::new(store);
         let progress = Mutex::new(LabelProgress::default());
         let mut sent = Vec::new();
-        let p = run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, || Ok(()), |s| {
+        let p = run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, &AtomicBool::new(false), || Ok(()), |s| {
             sent.push(s.to_string());
             Ok("code review".into())
         }).unwrap();
@@ -342,7 +364,7 @@ mod tests {
         assert!(!dump.contains("billing"));
         drop(s);
         // A second run sends nothing: every segment already has this model's label.
-        let p = run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, || Ok(()), |_| panic!("sent again")).unwrap();
+        let p = run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, &AtomicBool::new(false), || Ok(()), |_| panic!("sent again")).unwrap();
         assert_eq!(p.total, 0);
         std::fs::remove_dir_all(dir).ok();
     }
@@ -353,7 +375,7 @@ mod tests {
         let store = Mutex::new(store);
         let progress = Mutex::new(LabelProgress::default());
         let mut calls = 0;
-        let p = run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, || Ok(()), |_| {
+        let p = run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, &AtomicBool::new(false), || Ok(()), |_| {
             calls += 1;
             Err("connect: refused".into())
         }).unwrap();
@@ -376,7 +398,7 @@ mod tests {
         let store = Mutex::new(store);
         let progress = Mutex::new(LabelProgress::default());
         let mut loads = 0;
-        let p = run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, || {
+        let p = run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, &AtomicBool::new(false), || {
             loads += 1;
             let now = progress.lock().unwrap().clone();
             assert!(now.running && now.loading, "the card can say the model is loading: {now:?}");
@@ -388,8 +410,8 @@ mod tests {
         assert!(!p.running && !p.loading);
         // Nothing to label: no load either.
         let mut calls = 0;
-        run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, || Ok(()), |_| Ok("coding".into())).unwrap();
-        run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, || { calls += 1; Ok(()) }, |_| panic!("sent again")).unwrap();
+        run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, &AtomicBool::new(false), || Ok(()), |_| Ok("coding".into())).unwrap();
+        run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, &AtomicBool::new(false), || { calls += 1; Ok(()) }, |_| panic!("sent again")).unwrap();
         assert_eq!(calls, 0, "every segment is labelled: Ollama is not asked to load anything");
         std::fs::remove_dir_all(dir).ok();
     }
@@ -404,13 +426,49 @@ mod tests {
     }
 
     #[test]
+    fn stop_ends_the_pass_before_the_load_or_between_labels() {
+        let (store, dir) = fixture();
+        let store = Mutex::new(store);
+        let progress = Mutex::new(LabelProgress::default());
+        // Stopped before it starts: no load, no label.
+        let stop = AtomicBool::new(true);
+        let p = run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, &stop,
+            || panic!("no load after Stop"), |_| panic!("no label after Stop")).unwrap();
+        assert!(p.stopped.as_deref().unwrap().starts_with("Stopped"), "{:?}", p.stopped);
+        assert!(!p.running && !p.loading);
+        // Stopped during the second label: that request ends with an error, which
+        // is the Stop and not a failure, and nothing more is sent.
+        let stop = AtomicBool::new(false);
+        let mut sent = 0;
+        let p = run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, &stop, || Ok(()), |_| {
+            sent += 1;
+            if sent == 2 { stop.store(true, Ordering::SeqCst); return Err(crate::ollama::STOPPED.into()); }
+            Ok("coding".into())
+        }).unwrap();
+        assert_eq!((sent, p.labelled, p.failed), (2, 1, 0));
+        assert!(p.stopped.as_deref().unwrap().contains("1 labelled"), "{:?}", p.stopped);
+        assert!(!p.running);
+        // Stopped while a label succeeds: that label is kept, no next request.
+        let stop = AtomicBool::new(false);
+        let mut sent = 0;
+        let p = run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, &stop, || Ok(()), |_| {
+            sent += 1;
+            if sent == 2 { stop.store(true, Ordering::SeqCst); }
+            Ok("coding".into())
+        }).unwrap();
+        assert_eq!((sent, p.labelled, p.failed), (2, 2, 0), "{p:?}");
+        assert!(p.stopped.as_deref().unwrap().starts_with("Stopped"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn each_transcript_is_read_once_and_the_store_is_free_during_requests() {
         let (store, dir) = fixture();
         let store = Mutex::new(store);
         let progress = Mutex::new(LabelProgress::default());
         let before = transcript_reads();
         let mut free = 0;
-        run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, || Ok(()), |_| {
+        run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, &AtomicBool::new(false), || Ok(()), |_| {
             // The UI's commands need the store while the pass runs.
             if store.try_lock().is_ok() { free += 1; }
             Ok("coding".into())
@@ -427,7 +485,7 @@ mod tests {
         let store = Mutex::new(store);
         let progress = Mutex::new(LabelProgress::default());
         let mut i = 0;
-        let p = run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, || Ok(()), |_| {
+        let p = run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, &AtomicBool::new(false), || Ok(()), |_| {
             i += 1;
             if i % 2 == 0 { Err("timeout".into()) } else { Ok("coding".into()) }
         }).unwrap();

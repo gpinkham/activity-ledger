@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { save } from "@tauri-apps/plugin-dialog";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell, Legend } from "recharts";
-import { getActivity, getLabelProgress, getPriceTable, getSettings, runModelLabels, saveExport, setPriceTable, setSettings } from "../lib/ipc";
+import { getActivity, getLabelProgress, getPriceTable, getSettings, runModelLabels, saveExport, setPriceTable, setSettings, stopModelLabels } from "../lib/ipc";
 import { useFilters } from "../state/filters";
 import { ChartCard } from "../components/ChartCard";
 import { KpiRow } from "../components/KpiRow";
@@ -312,6 +312,12 @@ function SettingsCard() {
             className="px-3 py-1 rounded-md border border-line text-ink hover:bg-elevated disabled:opacity-50">
             {progress?.loading ? "Loading the model…" : progress?.running ? "Labelling…" : "Label now"}
           </button>
+          {progress?.running && (
+            <button onClick={() => stopModelLabels().catch((e) => setLabelError(String(e)))}
+              className="px-3 py-1 rounded-md border border-line text-ink hover:bg-elevated">
+              Stop
+            </button>
+          )}
           {progress && <span className="text-xs text-muted">labelled {progress.labelled} of {progress.total}{progress.failed ? `, ${progress.failed} failed` : ""}</span>}
           {progress?.stopped && <span className="text-xs text-red-500">{progress.stopped}</span>}
           {labelError && <span className="text-xs text-red-500">{labelError}</span>}

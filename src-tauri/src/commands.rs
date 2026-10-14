@@ -10,7 +10,8 @@ use crate::settings::AppSettings;
 use crate::store::Store;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 pub struct AppState {
     pub store: Mutex<Store>,
@@ -21,6 +22,8 @@ pub struct AppState {
     pub settings_path: PathBuf,
     /// The labelling pass's progress, polled by the settings card.
     pub label_progress: Mutex<LabelProgress>,
+    /// Set by Stop; cleared when a pass starts.
+    pub label_stop: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -112,7 +115,7 @@ pub fn get_activity(state: tauri::State<AppState>, filters: Filters, label_sourc
 pub fn run_model_labels(app: tauri::AppHandle, state: tauri::State<AppState>, filters: Filters) -> Result<(), String> {
     use tauri::Manager;
     let settings = state.settings.lock().map_err(|e| e.to_string())?.clone();
-    let endpoint = labeller::prepare(&settings)?;
+    let mut endpoint = labeller::prepare(&settings)?;
     {
         let mut p = state.label_progress.lock().map_err(|e| e.to_string())?;
         if p.running {
@@ -120,12 +123,14 @@ pub fn run_model_labels(app: tauri::AppHandle, state: tauri::State<AppState>, fi
         }
         *p = LabelProgress { running: true, ..Default::default() };
     }
+    state.label_stop.store(false, Ordering::SeqCst);
+    endpoint.stop = state.label_stop.clone();
     let price = state.price.lock().map_err(|e| e.to_string())?.clone();
     std::thread::spawn(move || {
         let st = app.state::<AppState>();
         let model = settings.ollama_model.clone();
         let num_ctx = labeller::request_num_ctx(settings.local_context_limit);
-        let result = labeller::run(&st.store, &price, &filters, &settings, &st.label_progress,
+        let result = labeller::run(&st.store, &price, &filters, &settings, &st.label_progress, &st.label_stop,
             || crate::ollama::load_model(&endpoint, &model, num_ctx, crate::ollama::LOAD_TIMEOUT),
             |summary| crate::ollama::chat_label(&endpoint, &model, summary, num_ctx, crate::ollama::LABEL_TIMEOUT));
         if let Err(e) = result {
@@ -136,6 +141,12 @@ pub fn run_model_labels(app: tauri::AppHandle, state: tauri::State<AppState>, fi
         }
     });
     Ok(())
+}
+
+/// Stop the labelling pass: a waiting request ends at once, and no new one starts.
+#[tauri::command]
+pub fn stop_model_labels(state: tauri::State<AppState>) {
+    state.label_stop.store(true, Ordering::SeqCst);
 }
 
 #[tauri::command]
