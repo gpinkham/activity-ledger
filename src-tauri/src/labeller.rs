@@ -9,7 +9,7 @@
 
 use crate::activity::{segment_key, Segment};
 use crate::metrics::Filters;
-use crate::ollama::{check_url, Endpoint, PROMPT_VERSION, SYSTEM_PROMPT};
+use crate::ollama::{check_url, system_prompt, Endpoint, PROMPT_VERSION};
 use crate::pricing::PriceTable;
 use crate::settings::AppSettings;
 use crate::store::Store;
@@ -91,7 +91,7 @@ pub fn excerpt_budget(num_ctx: i64, counts_chars: usize) -> usize {
     if num_ctx < 1000 {
         return 0;
     }
-    let tokens = num_ctx.min(REQUEST_MAX_TOKENS) - 64 - (SYSTEM_PROMPT.len() / 4) as i64 - (counts_chars / 4) as i64;
+    let tokens = num_ctx.min(REQUEST_MAX_TOKENS) - 64 - (system_prompt().len() / 4) as i64 - (counts_chars / 4) as i64;
     if tokens <= 0 { 0 } else { ((tokens * 4) as usize).min(EXCERPT_MAX_CHARS) }
 }
 
@@ -366,6 +366,32 @@ mod tests {
         // A second run sends nothing: every segment already has this model's label.
         let p = run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, &AtomicBool::new(false), || Ok(()), |_| panic!("sent again")).unwrap();
         assert_eq!(p.total, 0);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn labels_from_an_older_prompt_are_redone() {
+        assert_ne!(PROMPT_VERSION, "label-prompt-v2", "the prompt with definitions is a new version");
+        let (store, dir) = fixture();
+        // Every segment already has a label from the previous prompt.
+        let raw = store.raw_label_jobs(&PriceTable::seed(), &Filters::default(), "qwen3:8b").unwrap();
+        assert_eq!(raw.len(), 5);
+        for j in &raw {
+            store.conn.execute(
+                "INSERT INTO segment_model_labels(segment_key, model, prompt_version, label) VALUES (?1, 'qwen3:8b', 'label-prompt-v2', 'coding')",
+                [&j.key],
+            ).unwrap();
+        }
+        let store = Mutex::new(store);
+        let progress = Mutex::new(LabelProgress::default());
+        let mut sent = 0;
+        let p = run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, &AtomicBool::new(false), || Ok(()), |_| {
+            sent += 1;
+            Ok("review / explore".into())
+        }).unwrap();
+        assert_eq!((sent, p.labelled), (5, 5), "old-version labels do not count as done");
+        let s = store.lock().unwrap();
+        assert!(s.model_labels("qwen3:8b").unwrap().values().all(|l| l == "review / explore"), "the view uses the new labels");
         std::fs::remove_dir_all(dir).ok();
     }
 

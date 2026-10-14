@@ -18,7 +18,22 @@ pub const MODEL_LABELS: [&str; 10] = [
     "coding", "debugging", "code review", "triage", "research", "review / explore",
     "shell / ops", "chat / planning", "other work", "overhead",
 ];
-pub const PROMPT_VERSION: &str = "label-prompt-v2";
+/// One line per label for the system prompt, in MODEL_LABELS order. They match
+/// the README's label table, so the model and the rules mean the same thing.
+pub const LABEL_DEFINITIONS: [(&str, &str); 10] = [
+    ("coding", "it edited or wrote files: code, notes or docs"),
+    ("debugging", "it edited files to fix something that kept failing, with repeated failing test runs"),
+    ("code review", "it read and tested changes, or looked at a pull request or git range, without editing source"),
+    ("triage", "it sorted incoming issues, tasks or messages and decided what to do, without doing the work"),
+    ("research", "it looked things up on the web or in documentation"),
+    ("review / explore", "it mostly read files to understand code"),
+    ("shell / ops", "it mostly ran shell commands: builds, installs, deploys, git"),
+    ("chat / planning", "it used no tools, or only planning tools such as a to-do list or launching a sub-agent"),
+    ("other work", "work that fits none of the above"),
+    ("overhead", "a context compaction or other bookkeeping, not the task itself"),
+];
+/// Stored model labels are keyed by this; a new prompt means they are redone.
+pub const PROMPT_VERSION: &str = "label-prompt-v3";
 /// The largest response accepted. A label answer is a few hundred bytes; a bigger
 /// (or claimed bigger) body is refused before it is read into memory.
 pub const MAX_RESPONSE_BYTES: usize = 1 << 20;
@@ -37,7 +52,19 @@ const STOP_POLL: Duration = Duration::from_millis(200);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// How much of an error body to show.
 const ERROR_EXCERPT_CHARS: usize = 200;
-pub const SYSTEM_PROMPT: &str = "You label one stretch of AI coding-agent work. Answer with JSON only: {\"label\": \"<one of the labels>\"}. Labels: coding, debugging, code review, triage, research, review / explore, shell / ops, chat / planning, other work, overhead.";
+/// The system prompt: the task, what to judge by, and every label's definition.
+pub fn system_prompt() -> String {
+    let mut p = String::from(
+        "You label one stretch of AI coding-agent work. You get what started it, its tool counts, \
+         and sometimes an excerpt of the opening prompt. Judge mostly by the tool counts: they say \
+         what the work did; the prompt only says what was asked. Answer with JSON only: \
+         {\"label\": \"<one of the labels>\"}. Labels:",
+    );
+    for (label, definition) in LABEL_DEFINITIONS {
+        p.push_str(&format!("\n- {label}: {definition}"));
+    }
+    p
+}
 
 #[derive(Debug, Clone)]
 pub struct Endpoint {
@@ -245,7 +272,7 @@ pub fn chat_label(ep: &Endpoint, model: &str, user: &str, num_ctx: i64, timeout:
         },
         "options": { "num_ctx": num_ctx, "num_predict": 64, "temperature": 0 },
         "messages": [
-            { "role": "system", "content": SYSTEM_PROMPT },
+            { "role": "system", "content": system_prompt() },
             { "role": "user", "content": user },
         ],
     })
@@ -356,6 +383,23 @@ mod tests {
 
     fn answer(message: Value) -> String {
         http("200 OK", &json!({"model": "m", "message": message, "done": true}).to_string())
+    }
+
+    #[test]
+    fn the_system_prompt_defines_every_label_and_is_what_is_sent() {
+        let labels: Vec<&str> = LABEL_DEFINITIONS.iter().map(|(l, _)| *l).collect();
+        assert_eq!(labels, MODEL_LABELS.to_vec(), "one definition per label, in the same order");
+        let prompt = system_prompt();
+        for (label, definition) in LABEL_DEFINITIONS {
+            assert!(!definition.trim().is_empty(), "{label}");
+            assert!(prompt.contains(&format!("- {label}: {definition}")), "{label} is defined in the prompt");
+        }
+        assert!(prompt.contains("tool counts"), "the model is told what to judge by");
+        let (url, rx) = fake_seq(vec![(Duration::ZERO, reply("coding"))]);
+        chat_label(&check_url(&url, false).unwrap(), "m", "s", 4096, T).unwrap();
+        let req = rx.recv().unwrap();
+        let body: Value = serde_json::from_str(req.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(body["messages"][0]["content"], prompt);
     }
 
     #[test]
