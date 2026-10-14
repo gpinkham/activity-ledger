@@ -20,6 +20,17 @@ pub const PROMPT_VERSION: &str = "label-prompt-v2";
 /// The largest response accepted. A label answer is a few hundred bytes; a bigger
 /// (or claimed bigger) body is refused before it is read into memory.
 pub const MAX_RESPONSE_BYTES: usize = 1 << 20;
+/// How long to wait for the model to load. The first call after Ollama starts,
+/// or after it unloads an idle model, reads the weights from disk and sets up
+/// the context; on a CPU-only Mac that can take minutes.
+pub const LOAD_TIMEOUT: Duration = Duration::from_secs(600);
+/// How long to wait for one label once the model is loaded. Ollama sends nothing
+/// until the answer is ready (no streaming), so this is the whole answer time.
+pub const LABEL_TIMEOUT: Duration = Duration::from_secs(300);
+/// Connecting is quick or it is not going to happen.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// How much of an error body to show.
+const ERROR_EXCERPT_CHARS: usize = 200;
 pub const SYSTEM_PROMPT: &str = "You label one stretch of AI coding-agent work. Answer with JSON only: {\"label\": \"<one of the labels>\"}. Labels: coding, debugging, code review, triage, research, review / explore, shell / ops, chat / planning, other work, overhead.";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -68,31 +79,56 @@ pub fn check_url(url: &str, allow_remote: bool) -> Result<Endpoint, String> {
     Ok(Endpoint { host, port, base: path.trim_end_matches('/').to_string(), remote_ok: allow_remote })
 }
 
+/// An io error as the settings card should show it: a refused connection and a
+/// timeout each say what they mean, since both used to read as "not reachable".
+fn io_error(stage: &str, e: &std::io::Error, ep: &Endpoint, timeout: Duration) -> String {
+    use std::io::ErrorKind::*;
+    match e.kind() {
+        ConnectionRefused => format!("nothing is listening at {}:{} (connection refused). Is Ollama running?", ep.host, ep.port),
+        // A read timeout is WouldBlock on macOS and TimedOut on Linux.
+        WouldBlock | TimedOut => format!("no answer from Ollama within {} s (timed out while {stage})", timeout.as_secs_f32().round() as u64),
+        _ => format!("{stage}: {e}"),
+    }
+}
+
+/// A non-2xx answer: the status, and Ollama's own error text (its body is
+/// {"error": "..."}), or the start of whatever else the body holds.
+fn http_error(code: u16, body: &[u8]) -> String {
+    let text = String::from_utf8_lossy(body);
+    let said = serde_json::from_str::<Value>(&text).ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+        .unwrap_or_else(|| text.trim().to_string());
+    let excerpt: String = said.chars().take(ERROR_EXCERPT_CHARS).collect();
+    let more = if said.chars().count() > ERROR_EXCERPT_CHARS { "..." } else { "" };
+    if excerpt.is_empty() { format!("Ollama answered {code}") } else { format!("Ollama answered {code}: {excerpt}{more}") }
+}
+
 /// POST a JSON body and return the response body. Errors on a connect failure,
-/// a timeout (connect, write or read), or a non-2xx status.
+/// a timeout (write or read; `timeout` is the wait for the answer), or a
+/// non-2xx status, each with its own message.
 pub fn post_json(ep: &Endpoint, path: &str, body: &str, timeout: Duration) -> Result<String, String> {
     let host = ep.host.trim_start_matches('[').trim_end_matches(']');
     let addr = (host, ep.port).to_socket_addrs().map_err(|e| e.to_string())?.next().ok_or("no address")?;
     if !ep.remote_ok && !addr.ip().is_loopback() {
         return Err(format!("{} resolved to {}, which is not this machine", ep.host, addr.ip()));
     }
-    let mut stream = TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("connect: {e}"))?;
+    let mut stream = TcpStream::connect_timeout(&addr, timeout.min(CONNECT_TIMEOUT)).map_err(|e| io_error("connecting", &e, ep, CONNECT_TIMEOUT))?;
     stream.set_read_timeout(Some(timeout)).ok();
     stream.set_write_timeout(Some(timeout)).ok();
     let req = format!(
         "POST {}{} HTTP/1.1\r\nHost: {}:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         ep.base, path, ep.host, ep.port, body.len(), body
     );
-    stream.write_all(req.as_bytes()).map_err(|e| format!("write: {e}"))?;
+    stream.write_all(req.as_bytes()).map_err(|e| io_error("sending", &e, ep, timeout))?;
     let mut reader = BufReader::new(stream);
     let mut status = String::new();
-    reader.read_line(&mut status).map_err(|e| format!("read: {e}"))?;
+    reader.read_line(&mut status).map_err(|e| io_error("waiting for the answer", &e, ep, timeout))?;
     let code: u16 = status.split_whitespace().nth(1).and_then(|c| c.parse().ok()).ok_or_else(|| format!("bad status line: {}", status.trim()))?;
     let mut length: Option<usize> = None;
     let mut chunked = false;
     loop {
         let mut line = String::new();
-        reader.read_line(&mut line).map_err(|e| format!("read: {e}"))?;
+        reader.read_line(&mut line).map_err(|e| io_error("waiting for the answer", &e, ep, timeout))?;
         let line = line.trim_end();
         if line.is_empty() { break; }
         let (k, v) = line.split_once(':').unwrap_or((line, ""));
@@ -107,12 +143,12 @@ pub fn post_json(ep: &Endpoint, path: &str, body: &str, timeout: Duration) -> Re
     if chunked {
         loop {
             let mut size = String::new();
-            reader.read_line(&mut size).map_err(|e| format!("read: {e}"))?;
+            reader.read_line(&mut size).map_err(|e| io_error("waiting for the answer", &e, ep, timeout))?;
             let n = usize::from_str_radix(size.trim().split(';').next().unwrap_or("0"), 16).map_err(|_| "bad chunk size".to_string())?;
             if n == 0 { break; }
             if out.len().saturating_add(n) > MAX_RESPONSE_BYTES { return Err(too_large()); }
             let mut buf = vec![0u8; n];
-            reader.read_exact(&mut buf).map_err(|e| format!("read: {e}"))?;
+            reader.read_exact(&mut buf).map_err(|e| io_error("waiting for the answer", &e, ep, timeout))?;
             out.extend_from_slice(&buf);
             let mut crlf = String::new();
             reader.read_line(&mut crlf).ok();
@@ -120,13 +156,13 @@ pub fn post_json(ep: &Endpoint, path: &str, body: &str, timeout: Duration) -> Re
     } else if let Some(n) = length {
         if n > MAX_RESPONSE_BYTES { return Err(too_large()); }
         out.resize(n, 0);
-        reader.read_exact(&mut out).map_err(|e| format!("read: {e}"))?;
+        reader.read_exact(&mut out).map_err(|e| io_error("waiting for the answer", &e, ep, timeout))?;
     } else {
-        reader.by_ref().take(MAX_RESPONSE_BYTES as u64 + 1).read_to_end(&mut out).map_err(|e| format!("read: {e}"))?;
+        reader.by_ref().take(MAX_RESPONSE_BYTES as u64 + 1).read_to_end(&mut out).map_err(|e| io_error("waiting for the answer", &e, ep, timeout))?;
         if out.len() > MAX_RESPONSE_BYTES { return Err(too_large()); }
     }
     if !(200..300).contains(&code) {
-        return Err(format!("Ollama answered {code}"));
+        return Err(http_error(code, &out));
     }
     String::from_utf8(out).map_err(|_| "response is not UTF-8".to_string())
 }
@@ -150,6 +186,14 @@ pub fn chat_label(ep: &Endpoint, model: &str, user: &str, num_ctx: i64, timeout:
     let answer: Value = serde_json::from_str(content.trim()).map_err(|_| "the model did not answer JSON".to_string())?;
     let label = answer.get("label").and_then(|l| l.as_str()).map(|l| l.trim().to_lowercase()).ok_or("no label in the answer")?;
     if MODEL_LABELS.contains(&label.as_str()) { Ok(label) } else { Err(format!("not a known label: {label}")) }
+}
+
+/// Load the model before the first label, with its own long wait. Ollama loads
+/// a model when it gets a chat with no messages; the context size must match
+/// the label requests' or Ollama loads it again for them.
+pub fn load_model(ep: &Endpoint, model: &str, num_ctx: i64, timeout: Duration) -> Result<(), String> {
+    let body = json!({ "model": model, "stream": false, "messages": [], "options": { "num_ctx": num_ctx } }).to_string();
+    post_json(ep, "/api/chat", &body, timeout).map(|_| ())
 }
 
 #[cfg(test)]
@@ -179,6 +223,72 @@ mod tests {
         format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}", body.len(), body)
     }
     const T: Duration = Duration::from_millis(1500);
+
+    /// A fake Ollama that answers one request per step, in order: it waits the
+    /// step's delay (a model loading), then writes the raw response. Every
+    /// request it reads is sent back on the channel.
+    fn fake_seq(steps: Vec<(Duration, String)>) -> (String, std::sync::mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for (delay, response) in steps {
+                let Ok((mut s, _)) = listener.accept() else { return };
+                let mut buf = [0u8; 16384];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let _ = tx.send(String::from_utf8_lossy(&buf[..n]).to_string());
+                std::thread::sleep(delay);
+                let _ = s.write_all(response.as_bytes());
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), rx)
+    }
+    fn http(code: &str, body: &str) -> String {
+        format!("HTTP/1.1 {code}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}", body.len(), body)
+    }
+
+    #[test]
+    fn a_slow_answer_is_reported_as_a_timeout_not_as_unreachable() {
+        let (url, _rx) = fake_seq(vec![(Duration::from_millis(900), reply("coding"))]);
+        let ep = check_url(&url, false).unwrap();
+        let err = chat_label(&ep, "m", "s", 4096, Duration::from_millis(200)).unwrap_err();
+        assert!(err.contains("timed out") && err.contains("no answer"), "{err}");
+    }
+
+    #[test]
+    fn the_model_is_loaded_first_with_its_own_long_wait_then_labels_work() {
+        // The load answers after longer than a label request may wait.
+        let load = http("200 OK", r#"{"model":"m","done":true,"done_reason":"load"}"#);
+        let (url, rx) = fake_seq(vec![(Duration::from_millis(700), load), (Duration::ZERO, reply("coding"))]);
+        let ep = check_url(&url, false).unwrap();
+        load_model(&ep, "m", 4096, Duration::from_secs(5)).unwrap();
+        let req = rx.recv().unwrap();
+        let body: Value = serde_json::from_str(req.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(body["model"], "m");
+        assert_eq!(body["messages"], json!([]), "an empty chat only loads the model");
+        assert_eq!(body["options"]["num_ctx"], 4096, "loaded with the context the labels use, so no reload");
+        assert_eq!(chat_label(&ep, "m", "s", 4096, Duration::from_millis(500)).unwrap(), "coding");
+    }
+
+    #[test]
+    fn an_http_error_names_the_status_and_what_ollama_said() {
+        let missing = http("404 Not Found", r#"{"error":"model \"qwen3:32b\" not found, try pulling it first"}"#);
+        let (url, _rx) = fake_seq(vec![(Duration::ZERO, missing)]);
+        let err = load_model(&check_url(&url, false).unwrap(), "qwen3:32b", 4096, T).unwrap_err();
+        assert!(err.contains("404") && err.contains("not found, try pulling it first"), "{err}");
+        // A body that is not Ollama's JSON is quoted, cut short.
+        let (url, _rx) = fake_seq(vec![(Duration::ZERO, http("500 Internal Server Error", &"boom ".repeat(200)))]);
+        let err = chat_label(&check_url(&url, false).unwrap(), "m", "s", 4096, T).unwrap_err();
+        assert!(err.contains("500") && err.contains("boom"), "{err}");
+        assert!(err.len() < 400, "the body is an excerpt: {}", err.len());
+    }
+
+    #[test]
+    fn nothing_listening_is_reported_as_connection_refused() {
+        let port = { let l = TcpListener::bind("127.0.0.1:0").unwrap(); l.local_addr().unwrap().port() };
+        let err = chat_label(&check_url(&format!("http://127.0.0.1:{port}"), false).unwrap(), "m", "s", 4096, T).unwrap_err();
+        assert!(err.contains("connection refused") && err.contains("Is Ollama running"), "{err}");
+    }
 
     #[test]
     fn only_loopback_unless_remote_is_allowed_and_only_http() {

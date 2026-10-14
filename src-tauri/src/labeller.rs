@@ -33,6 +33,10 @@ pub const EXCERPT_MAX_CHARS: usize = 1200;
 /// The request (system + summary + reply) stays within this many tokens, and
 /// within the configured context limit, at 4 characters a token.
 pub const REQUEST_MAX_TOKENS: i64 = 2000;
+/// The context the model is loaded with for labelling: room for one request and
+/// its answer. The configured limit is the model's ceiling, not what a label
+/// needs; asking for all of it makes Ollama reserve that much and load slowly.
+pub const LABEL_NUM_CTX: i64 = 4096;
 /// Failures in a row that stop the pass.
 pub const MAX_FAILURES_IN_A_ROW: u32 = 3;
 
@@ -43,6 +47,8 @@ pub struct LabelProgress {
     pub done: usize,
     pub labelled: usize,
     pub failed: usize,
+    /// Waiting for Ollama to load the model, before the first label.
+    pub loading: bool,
     /// Why the pass stopped early, for the settings card.
     pub stopped: Option<String>,
 }
@@ -70,6 +76,12 @@ pub fn prepare(settings: &AppSettings) -> Result<Endpoint, String> {
         return Err("no Ollama model is set".into());
     }
     check_url(&settings.ollama_url, settings.allow_remote_ollama)
+}
+
+/// The num_ctx sent with every label request (and the load): LABEL_NUM_CTX, or
+/// the configured limit when that is smaller.
+pub fn request_num_ctx(limit: i64) -> i64 {
+    limit.min(LABEL_NUM_CTX)
 }
 
 /// How many characters of excerpt fit: none below a 1,000-token context, else up
@@ -203,14 +215,17 @@ impl Store {
 }
 
 /// Label every unlabelled segment, one request at a time. The store is locked
-/// only to read the jobs and to save each label, never during a request. `send`
-/// is the model call (ollama::chat_label in the app). Returns the final progress.
+/// only to read the jobs and to save each label, never during a request. `load`
+/// asks Ollama to load the model first (ollama::load_model), with a longer wait
+/// than one label gets; it is skipped when there is nothing to label. `send` is
+/// the model call (ollama::chat_label in the app). Returns the final progress.
 pub fn run(
     store: &Mutex<Store>,
     price: &PriceTable,
     f: &Filters,
     settings: &AppSettings,
     progress: &Mutex<LabelProgress>,
+    load: impl FnOnce() -> Result<(), String>,
     mut send: impl FnMut(&str) -> Result<String, String>,
 ) -> Result<LabelProgress, String> {
     let model = settings.ollama_model.clone();
@@ -222,7 +237,17 @@ pub fn run(
     };
     let jobs = build_jobs(raw, settings.local_context_limit);
     let set = |p: LabelProgress| { if let Ok(mut g) = progress.lock() { *g = p.clone(); } p };
-    let mut p = set(LabelProgress { running: true, total: jobs.len(), ..Default::default() });
+    let mut p = set(LabelProgress { running: true, total: jobs.len(), loading: !jobs.is_empty(), ..Default::default() });
+    if p.loading {
+        let loaded = load();
+        p.loading = false;
+        if let Err(e) = loaded {
+            p.running = false;
+            p.stopped = Some(format!("Could not load {model} in Ollama at {}: {e}. Rule labels unchanged.", settings.ollama_url));
+            return Ok(set(p));
+        }
+        p = set(p);
+    }
     let mut in_a_row = 0;
     for job in jobs {
         match send(&job.summary) {
@@ -236,7 +261,7 @@ pub fn run(
                 in_a_row += 1;
                 p.failed += 1;
                 if in_a_row >= MAX_FAILURES_IN_A_ROW {
-                    p.stopped = Some(format!("Ollama not reachable at {} ({e}); rule labels unchanged", settings.ollama_url));
+                    p.stopped = Some(format!("Stopped after {MAX_FAILURES_IN_A_ROW} failures in a row. Last: {e}. Rule labels unchanged."));
                     p.done += 1;
                     break;
                 }
@@ -299,7 +324,7 @@ mod tests {
         let store = Mutex::new(store);
         let progress = Mutex::new(LabelProgress::default());
         let mut sent = Vec::new();
-        let p = run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, |s| {
+        let p = run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, || Ok(()), |s| {
             sent.push(s.to_string());
             Ok("code review".into())
         }).unwrap();
@@ -317,7 +342,7 @@ mod tests {
         assert!(!dump.contains("billing"));
         drop(s);
         // A second run sends nothing: every segment already has this model's label.
-        let p = run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, |_| panic!("sent again")).unwrap();
+        let p = run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, || Ok(()), |_| panic!("sent again")).unwrap();
         assert_eq!(p.total, 0);
         std::fs::remove_dir_all(dir).ok();
     }
@@ -328,12 +353,14 @@ mod tests {
         let store = Mutex::new(store);
         let progress = Mutex::new(LabelProgress::default());
         let mut calls = 0;
-        let p = run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, |_| {
+        let p = run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, || Ok(()), |_| {
             calls += 1;
             Err("connect: refused".into())
         }).unwrap();
         assert_eq!(calls, 3, "three failures in a row stop the pass");
-        assert!(p.stopped.as_deref().unwrap().contains("Ollama not reachable"));
+        let why = p.stopped.as_deref().unwrap();
+        assert!(why.contains("3 failures in a row") && why.contains("connect: refused"), "the last error is shown as it is: {why}");
+        assert!(!why.contains("not reachable"), "not every failure is an unreachable Ollama: {why}");
         assert_eq!(progress.lock().unwrap().clone(), p);
         let s = store.lock().unwrap();
         let r = s.activity(&PriceTable::seed(), &Filters::default(), &on()).unwrap();
@@ -344,13 +371,46 @@ mod tests {
     }
 
     #[test]
+    fn the_model_is_loaded_once_before_the_labels_and_a_failed_load_stops_the_pass() {
+        let (store, dir) = fixture();
+        let store = Mutex::new(store);
+        let progress = Mutex::new(LabelProgress::default());
+        let mut loads = 0;
+        let p = run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, || {
+            loads += 1;
+            let now = progress.lock().unwrap().clone();
+            assert!(now.running && now.loading, "the card can say the model is loading: {now:?}");
+            Err("Ollama answered 404: model \"qwen3:8b\" not found".into())
+        }, |_| panic!("no label request after a failed load")).unwrap();
+        assert_eq!(loads, 1);
+        let why = p.stopped.as_deref().unwrap();
+        assert!(why.contains("Could not load qwen3:8b") && why.contains("not found"), "{why}");
+        assert!(!p.running && !p.loading);
+        // Nothing to label: no load either.
+        let mut calls = 0;
+        run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, || Ok(()), |_| Ok("coding".into())).unwrap();
+        run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, || { calls += 1; Ok(()) }, |_| panic!("sent again")).unwrap();
+        assert_eq!(calls, 0, "every segment is labelled: Ollama is not asked to load anything");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn label_requests_ask_for_a_small_context_not_the_whole_limit() {
+        // A label request is at most REQUEST_MAX_TOKENS in and 64 out. Asking
+        // Ollama for the full 32k makes it reserve memory for 32k and load slowly.
+        assert_eq!(request_num_ctx(32_000), LABEL_NUM_CTX);
+        assert!(LABEL_NUM_CTX >= REQUEST_MAX_TOKENS + 64);
+        assert_eq!(request_num_ctx(1_500), 1_500, "a smaller limit is kept");
+    }
+
+    #[test]
     fn each_transcript_is_read_once_and_the_store_is_free_during_requests() {
         let (store, dir) = fixture();
         let store = Mutex::new(store);
         let progress = Mutex::new(LabelProgress::default());
         let before = transcript_reads();
         let mut free = 0;
-        run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, |_| {
+        run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, || Ok(()), |_| {
             // The UI's commands need the store while the pass runs.
             if store.try_lock().is_ok() { free += 1; }
             Ok("coding".into())
@@ -367,7 +427,7 @@ mod tests {
         let store = Mutex::new(store);
         let progress = Mutex::new(LabelProgress::default());
         let mut i = 0;
-        let p = run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, |_| {
+        let p = run(&store, &PriceTable::seed(), &Filters::default(), &on(), &progress, || Ok(()), |_| {
             i += 1;
             if i % 2 == 0 { Err("timeout".into()) } else { Ok("coding".into()) }
         }).unwrap();

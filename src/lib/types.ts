@@ -74,5 +74,5 @@ export interface AppSettings {
   model_labels_enabled: boolean; allow_remote_ollama: boolean;
 }
 export interface LabelProgress {
-  running: boolean; total: number; done: number; labelled: number; failed: number; stopped: string | null;
+  running: boolean; loading: boolean; total: number; done: number; labelled: number; failed: number; stopped: string | null;
 }

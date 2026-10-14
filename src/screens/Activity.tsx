@@ -310,7 +310,7 @@ function SettingsCard() {
         <div className="mt-3 flex items-center gap-2 text-sm">
           <button onClick={labelNow} disabled={!!progress?.running}
             className="px-3 py-1 rounded-md border border-line text-ink hover:bg-elevated disabled:opacity-50">
-            {progress?.running ? "Labelling…" : "Label now"}
+            {progress?.loading ? "Loading the model…" : progress?.running ? "Labelling…" : "Label now"}
           </button>
           {progress && <span className="text-xs text-muted">labelled {progress.labelled} of {progress.total}{progress.failed ? `, ${progress.failed} failed` : ""}</span>}
           {progress?.stopped && <span className="text-xs text-red-500">{progress.stopped}</span>}

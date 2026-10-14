@@ -124,10 +124,10 @@ pub fn run_model_labels(app: tauri::AppHandle, state: tauri::State<AppState>, fi
     std::thread::spawn(move || {
         let st = app.state::<AppState>();
         let model = settings.ollama_model.clone();
-        let num_ctx = settings.local_context_limit;
-        let result = labeller::run(&st.store, &price, &filters, &settings, &st.label_progress, |summary| {
-            crate::ollama::chat_label(&endpoint, &model, summary, num_ctx, std::time::Duration::from_secs(30))
-        });
+        let num_ctx = labeller::request_num_ctx(settings.local_context_limit);
+        let result = labeller::run(&st.store, &price, &filters, &settings, &st.label_progress,
+            || crate::ollama::load_model(&endpoint, &model, num_ctx, crate::ollama::LOAD_TIMEOUT),
+            |summary| crate::ollama::chat_label(&endpoint, &model, summary, num_ctx, crate::ollama::LABEL_TIMEOUT));
         if let Err(e) = result {
             if let Ok(mut p) = st.label_progress.lock() {
                 p.running = false;
