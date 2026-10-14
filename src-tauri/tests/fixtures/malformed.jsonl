@@ -1,0 +1,4 @@
+{"type":"assistant","sessionId":"s2","timestamp":"2026-07-24T10:00:00.000Z","message":{"role":"assistant","model":"claude-haiku-4-5","usage":{"input_tokens":1,"output_tokens":1}}}
+this is not json
+{"type":"summary","subtype":"x"}
+{"type":"assistant"}

@@ -1,0 +1,90 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---- Design tokens: light (default values) ---- */
+:root {
+  color-scheme: light;
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --surface-2: #eef1f5;
+  --border: #e2e5ec;
+  --text: #14171f;
+  --muted: #626878;
+  --grid: #e5e7eb;
+  /* data ramp (deeper for contrast on light) */
+  --c1: #0d9488;
+  --c2: #0891b2;
+  --c3: #2563eb;
+  --c4: #7c3aed;
+  --c5: #c026d3;
+  --c6: #d97706;
+  --glow: rgba(37, 99, 235, 0.10);
+}
+
+/* ---- Design tokens: dark (neon terrain) ---- */
+:root.dark {
+  color-scheme: dark;
+  --bg: #0a0b12;
+  --surface: #12141c;
+  --surface-2: #1a1d27;
+  --border: #262a36;
+  --text: #e6e8ee;
+  --muted: #8b91a3;
+  --grid: #222634;
+  /* neon ramp */
+  --c1: #2dd4bf;
+  --c2: #22d3ee;
+  --c3: #60a5fa;
+  --c4: #a78bfa;
+  --c5: #e879f9;
+  --c6: #fbbf24;
+  --glow: rgba(45, 212, 191, 0.14);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  transition: background-color 0.25s ease, color 0.25s ease;
+}
+
+/* Subtle ambient glow behind content in dark mode */
+:root.dark body {
+  background-image: radial-gradient(1200px 600px at 80% -10%, rgba(232, 121, 249, 0.05), transparent 60%),
+    radial-gradient(900px 500px at -5% 10%, rgba(45, 212, 191, 0.05), transparent 55%);
+  background-attachment: fixed;
+}
+
+/* Display-ish headings: tighter, a touch more character without a web font */
+.display {
+  letter-spacing: -0.02em;
+  font-weight: 650;
+}
+
+/* Timeline rail shimmer */
+@keyframes railShimmer {
+  0% { background-position: 0 0; }
+  100% { background-position: 0 -400px; }
+}
+.timeline-rail {
+  background: linear-gradient(180deg, var(--c1), var(--c4), var(--c5));
+  background-size: 100% 400px;
+  animation: railShimmer 6s linear infinite;
+}
+@keyframes nodeIn {
+  from { opacity: 0; transform: translateX(-6px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.timeline-node-row { animation: nodeIn 0.35s ease both; }
+@media (prefers-reduced-motion: reduce) {
+  .timeline-rail { animation: none; }
+  .timeline-node-row { animation: none; }
+}

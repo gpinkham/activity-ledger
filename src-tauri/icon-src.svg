@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#171a24"/>
+      <stop offset="1" stop-color="#0a0b12"/>
+    </linearGradient>
+    <linearGradient id="ridge" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e879f9"/>
+      <stop offset="0.55" stop-color="#60a5fa"/>
+      <stop offset="1" stop-color="#2dd4bf"/>
+    </linearGradient>
+    <linearGradient id="ridgeBack" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#a78bfa"/>
+      <stop offset="1" stop-color="#22d3ee"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.4" r="0.62">
+      <stop offset="0" stop-color="#2dd4bf" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#2dd4bf" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="18"/>
+    </filter>
+    <clipPath id="round"><rect x="0" y="0" width="1024" height="1024" rx="210" ry="210"/></clipPath>
+  </defs>
+  <g clip-path="url(#round)">
+    <rect width="1024" height="1024" fill="url(#bg)"/>
+    <rect width="1024" height="1024" fill="url(#glow)"/>
+    <!-- back ridge (soft, receding) -->
+    <path d="M0,650 L170,530 L330,600 L470,455 L620,555 L780,430 L920,535 L1024,495 L1024,1024 L0,1024 Z"
+          fill="url(#ridgeBack)" opacity="0.32" filter="url(#soft)"/>
+    <!-- front ridge glow halo -->
+    <path d="M0,770 L150,600 L300,705 L440,535 L560,655 L700,515 L850,665 L1024,575 L1024,1024 L0,1024 Z"
+          fill="url(#ridge)" opacity="0.5" filter="url(#soft)"/>
+    <!-- front ridge solid body -->
+    <path d="M0,770 L150,600 L300,705 L440,535 L560,655 L700,515 L850,665 L1024,575 L1024,1024 L0,1024 Z"
+          fill="url(#ridge)"/>
+    <!-- crisp ridgeline highlight -->
+    <path d="M0,770 L150,600 L300,705 L440,535 L560,655 L700,515 L850,665 L1024,575"
+          fill="none" stroke="#f5f7ff" stroke-opacity="0.55" stroke-width="7" stroke-linejoin="round" stroke-linecap="round"/>
+  </g>
+</svg>
