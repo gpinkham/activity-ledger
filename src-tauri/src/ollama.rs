@@ -217,6 +217,9 @@ pub fn post_json(ep: &Endpoint, path: &str, body: &str, timeout: Duration) -> Re
     String::from_utf8(out).map_err(|_| "response is not UTF-8".to_string())
 }
 
+/// How much of an answer is read at all, before <think> blocks are removed. A
+/// real answer is at most 64 tokens; this bounds the stripping work.
+const ANSWER_MAX_CHARS: usize = 64 * 1024;
 /// How much of an answer is searched for the label. A label answer is a few
 /// dozen characters; this bounds the work a huge answer can cause.
 const ANSWER_SCAN_CHARS: usize = 4096;
@@ -257,11 +260,12 @@ pub fn chat_label(ep: &Endpoint, model: &str, user: &str, num_ctx: i64, timeout:
 }
 
 /// The label in a model's answer. Accepts the answer as asked ({"label": ...}),
-/// and also wrapped in a <think> block, a code fence or prose: the first JSON
+/// and also wrapped in a <think> block, a code fence or prose (only the first
+/// ANSWER_MAX_CHARS are read): the first JSON
 /// object with a "label" string in the first ANSWER_SCAN_CHARS wins. The error
 /// quotes the start of the answer.
 fn parse_label(content: &str, thought: bool) -> Result<String, String> {
-    let mut text = content.to_string();
+    let mut text: String = content.chars().take(ANSWER_MAX_CHARS).collect();
     while let Some(start) = text.find("<think>") {
         match text[start..].find("</think>") {
             Some(end) => text.replace_range(start..start + end + "</think>".len(), ""),
@@ -396,6 +400,16 @@ mod tests {
         let err = chat_label(&check_url(&url, false).unwrap(), "m", "s", 4096, T).unwrap_err();
         assert!(err.contains("did not answer JSON"), "{err}");
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_huge_answer_of_think_blocks_is_cut_before_it_is_stripped() {
+        // Just under the 1 MB response cap: tens of thousands of empty blocks.
+        let content = format!("{}{{\"label\": \"coding\"}}", "<think></think>".repeat(60_000));
+        let started = std::time::Instant::now();
+        // Only the first ANSWER_MAX_CHARS are read, so the label at the end is not found.
+        assert!(parse_label(&content, false).is_err());
+        assert!(started.elapsed() < Duration::from_millis(500), "bounded work: {:?}", started.elapsed());
     }
 
     #[test]
