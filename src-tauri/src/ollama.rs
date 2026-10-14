@@ -394,7 +394,7 @@ mod tests {
             assert!(!definition.trim().is_empty(), "{label}");
             assert!(prompt.contains(&format!("- {label}: {definition}")), "{label} is defined in the prompt");
         }
-        assert!(prompt.contains("tool counts"), "the model is told what to judge by");
+        assert!(prompt.contains("Judge mostly by the tool counts"), "the model is told what to judge by");
         let (url, rx) = fake_seq(vec![(Duration::ZERO, reply("coding"))]);
         chat_label(&check_url(&url, false).unwrap(), "m", "s", 4096, T).unwrap();
         let req = rx.recv().unwrap();
