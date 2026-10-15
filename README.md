@@ -8,6 +8,8 @@ Activity Ledger is made by Pinkham Software. It is not made, endorsed or support
 
 Figures are estimates at Anthropic's published API list prices. They are not an invoice, and they are not your plan's usage.
 
+One row is not from the published list yet. `claude-haiku-5-5` is priced by prompt size: $0.10 input and $0.50 output per million tokens for a prompt of up to 100,000 tokens (input plus cache writes plus cache reads), and $0.50 input and $2.50 output above that. These figures were supplied by the maintainer on 2026-10-15; check them against the provider's pricing page. No cache prices were given, so this model's cache reads and writes use the same multipliers as the other rows (0.1x input for a read, 1.25x or 2x for a write). That part is an assumption.
+
 ## Work vs overhead
 
 - Overhead is what keeps the work going but is not the work: context compactions and, with a harness adapter on, its inbox handling, memory upkeep, standups and scheduled jobs.

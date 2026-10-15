@@ -15,6 +15,31 @@ pub struct ModelPrice {
     pub fast_input_per_m: Option<f64>,
     #[serde(default)]
     pub fast_output_per_m: Option<f64>,
+    /// Rates for prompts over a size, on a model priced by prompt size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub long_prompt: Option<LongPrompt>,
+    /// Where a row's numbers come from, when not from the published list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// The input and output rates for a call whose prompt (input + cache write + cache
+/// read) is over `above_tokens`; a prompt of exactly that size takes the row's rates.
+/// Cache reads and writes keep the row's multipliers on the higher input rate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LongPrompt {
+    pub above_tokens: i64,
+    pub input_per_m: f64,
+    pub output_per_m: f64,
+}
+
+impl ModelPrice {
+    fn rates(&self, long: bool) -> (f64, f64) {
+        match (long, &self.long_prompt) {
+            (true, Some(l)) => (l.input_per_m, l.output_per_m),
+            _ => (self.input_per_m, self.output_per_m),
+        }
+    }
 }
 
 /// Whether fast-mode rates apply: as each call recorded it (`speed: "fast"`),
@@ -69,6 +94,19 @@ pub fn fast_key(model: &str) -> String {
     format!("{model}{FAST_SUFFIX}")
 }
 
+/// Rollups mark each call over its row's prompt size with this suffix (see
+/// `model_sql`), after any FAST_SUFFIX, so long prompts are priced apart.
+pub const LONG_SUFFIX: &str = ":long";
+
+pub fn long_key(model: &str) -> String {
+    format!("{model}{LONG_SUFFIX}")
+}
+
+/// A rollup's model key without the prompt-size mark, for showing and merging rows.
+pub fn without_long(model: &str) -> &str {
+    model.trim_end_matches(LONG_SUFFIX)
+}
+
 fn row(input: f64, output: f64, read: f64, fast: Option<(f64, f64)>) -> ModelPrice {
     ModelPrice {
         input_per_m: input,
@@ -76,12 +114,15 @@ fn row(input: f64, output: f64, read: f64, fast: Option<(f64, f64)>) -> ModelPri
         cache_read_per_m: Some(read),
         fast_input_per_m: fast.map(|f| f.0),
         fast_output_per_m: fast.map(|f| f.1),
+        long_prompt: None,
+        note: None,
     }
 }
 
 impl PriceTable {
     /// Standard direct-API list prices, copied from
-    /// platform.claude.com/docs/en/about-claude/pricing on 2026-10-02.
+    /// platform.claude.com/docs/en/about-claude/pricing on 2026-10-02, and Haiku 5.5
+    /// added on 2026-10-15 from figures still to check against that page.
     pub fn seed() -> PriceTable {
         let mut models = HashMap::new();
         let mut add = |ids: &[&str], p: ModelPrice| {
@@ -97,6 +138,14 @@ impl PriceTable {
         add(&["claude-opus-4-1", "claude-opus-4"], row(15.0, 75.0, 1.50, None));
         add(&["claude-sonnet-5-5", "claude-sonnet-5"], row(2.0, 10.0, 0.20, None));
         add(&["claude-sonnet-4-6", "claude-sonnet-4-5", "claude-sonnet-4"], row(3.0, 15.0, 0.30, None));
+        add(&["claude-haiku-5-5"], ModelPrice {
+            long_prompt: Some(LongPrompt { above_tokens: 100_000, input_per_m: 0.50, output_per_m: 2.50 }),
+            note: Some("Supplied by the maintainer on 2026-10-15; verify against the provider's pricing page. \
+                        Over 100,000 prompt tokens: $0.50 in, $2.50 out. No cache prices were given, so the \
+                        standard multipliers (0.1x read, 1.25x and 2x writes) are an assumption."
+                .into()),
+            ..row(0.10, 0.50, 0.01, None)
+        });
         add(&["claude-haiku-4-5"], row(1.0, 5.0, 0.10, None));
         add(&["claude-3-5-haiku"], row(0.80, 4.0, 0.08, None));
         PriceTable {
@@ -104,7 +153,7 @@ impl PriceTable {
             default: row(5.0, 25.0, 0.50, None),
             us_only: false,
             fast_mode: FastMode::Auto,
-            prices_as_of: Some("2026-10-02".into()),
+            prices_as_of: Some("2026-10-15".into()),
         }
     }
 
@@ -135,7 +184,31 @@ impl PriceTable {
     }
 
     pub fn is_known(&self, model: &str) -> bool {
-        self.lookup(model.trim_end_matches(FAST_SUFFIX)).is_some()
+        self.lookup(without_long(model).trim_end_matches(FAST_SUFFIX)).is_some()
+    }
+
+    /// SQL for the `model` column that adds LONG_SUFFIX to each call over its row's
+    /// prompt size, for the rollups that sum calls by model before pricing them.
+    /// Plain `model` while no row is priced by prompt size.
+    pub fn model_sql(&self) -> String {
+        let mut whens: Vec<String> = self
+            .models
+            .iter()
+            .filter_map(|(k, p)| p.long_prompt.as_ref().map(|l| (k, l.above_tokens)))
+            .map(|(k, above)| {
+                let n = k.chars().count() + 1;
+                let k = k.replace('\'', "''");
+                format!(
+                    "WHEN (model = '{k}' OR substr(model, 1, {n}) IN ('{k}-', '{k}:')) \
+                     AND input_tokens + cache_creation + cache_read > {above} THEN model || '{LONG_SUFFIX}'"
+                )
+            })
+            .collect();
+        if whens.is_empty() {
+            return "model".into();
+        }
+        whens.sort();
+        format!("(CASE {} ELSE model END)", whens.join(" "))
     }
 
     fn price(&self, model: &str) -> &ModelPrice {
@@ -148,6 +221,8 @@ impl PriceTable {
     }
 
     pub fn cost(&self, model: &str, tb: &TokenBreakdown) -> f64 {
+        let long = model.ends_with(LONG_SUFFIX);
+        let model = without_long(model);
         let recorded_fast = model.ends_with(FAST_SUFFIX);
         let base = model.trim_end_matches(FAST_SUFFIX);
         let p = self.price(base);
@@ -159,7 +234,7 @@ impl PriceTable {
         let read_mult = p.cache_read_per_m.map(|r| r / p.input_per_m).unwrap_or(CACHE_READ_MULT);
         let (in_rate, out_rate) = match (fast, p.fast_input_per_m, p.fast_output_per_m) {
             (true, Some(i), Some(o)) => (i, o),
-            _ => (p.input_per_m, p.output_per_m),
+            _ => p.rates(long),
         };
         let input = tb.input as f64 * in_rate;
         let output = tb.output as f64 * out_rate;
@@ -171,9 +246,10 @@ impl PriceTable {
     }
 
     pub fn saved(&self, model: &str, cache_read: i64) -> f64 {
-        let p = self.price(model.trim_end_matches(FAST_SUFFIX));
+        let long = model.ends_with(LONG_SUFFIX);
+        let p = self.price(without_long(model).trim_end_matches(FAST_SUFFIX));
         let read_mult = p.cache_read_per_m.map(|r| r / p.input_per_m).unwrap_or(CACHE_READ_MULT);
-        cache_read as f64 * p.input_per_m * (1.0 - read_mult) / 1_000_000.0
+        cache_read as f64 * p.rates(long).0 * (1.0 - read_mult) / 1_000_000.0
     }
 }
 
@@ -284,6 +360,46 @@ mod tests {
         std::fs::write(&path, "not json").unwrap();
         assert!(!PriceTable::load_or_seed(&path).us_only);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn haiku_5_5_is_priced_by_prompt_size() {
+        let t = PriceTable::seed();
+        let tb = TokenBreakdown { input: 1_000_000, output: 1_000_000, ..Default::default() };
+        // Up to 100,000 prompt tokens: $0.10 in, $0.50 out. Over: $0.50 in, $2.50 out.
+        assert!((t.cost("claude-haiku-5-5", &tb) - 0.60).abs() < 1e-9);
+        assert!((t.cost(&long_key("claude-haiku-5-5"), &tb) - 3.0).abs() < 1e-9);
+        assert!((t.cost(&long_key("claude-haiku-5-5-20261001"), &tb) - 3.0).abs() < 1e-9, "dated ids too");
+        // Cache prices were not given: the standard 0.1x read and 1.25x / 2x writes, on the tier's input.
+        let cache = TokenBreakdown { cache_read: 1_000_000, cache_creation_5m: 1_000_000, cache_creation_1h: 1_000_000, ..Default::default() };
+        assert!((t.cost("claude-haiku-5-5", &cache) - (0.01 + 0.125 + 0.20)).abs() < 1e-9);
+        assert!((t.cost(&long_key("claude-haiku-5-5"), &cache) - (0.05 + 0.625 + 1.0)).abs() < 1e-9);
+        assert!((t.saved(&long_key("claude-haiku-5-5"), 1_000_000) - 0.45).abs() < 1e-9);
+        assert!(t.is_known("claude-haiku-5-5-20261001") && t.is_known(&long_key("claude-haiku-5-5")));
+        assert!(t.models["claude-haiku-5-5"].note.as_deref().is_some_and(|n| n.contains("assumption")));
+    }
+
+    #[test]
+    fn the_long_mark_changes_nothing_on_a_row_without_a_prompt_size_price() {
+        let t = PriceTable::seed();
+        let tb = TokenBreakdown { input: 1_000_000, output: 1_000_000, cache_read: 1_000_000, ..Default::default() };
+        for m in ["claude-opus-5-5", "claude-haiku-4-5", "mystery-model"] {
+            assert!((t.cost(&long_key(m), &tb) - t.cost(m, &tb)).abs() < 1e-12, "{m}");
+        }
+        assert!((t.cost(&long_key(&fast_key("claude-opus-5-5")), &tb) - t.cost(&fast_key("claude-opus-5-5"), &tb)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn model_sql_is_the_plain_column_until_a_row_is_priced_by_prompt_size() {
+        let mut t = PriceTable::seed();
+        assert!(t.model_sql().contains("100000"));
+        t.models.remove("claude-haiku-5-5");
+        assert_eq!(t.model_sql(), "model");
+        // A row without the new fields still loads, and saves without them.
+        let old = r#"{"models":{"m":{"input_per_m":1.0,"output_per_m":2.0}},"default":{"input_per_m":5.0,"output_per_m":25.0}}"#;
+        let t: PriceTable = serde_json::from_str(old).unwrap();
+        let back = serde_json::to_string(&t.models["m"]).unwrap();
+        assert!(!back.contains("long_prompt") && !back.contains("note"), "{back}");
     }
 
     #[test]

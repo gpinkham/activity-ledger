@@ -1,5 +1,5 @@
 use crate::metrics::{bind, where_clause, Filters};
-use crate::pricing::{PriceTable, TokenBreakdown};
+use crate::pricing::{without_long, PriceTable, TokenBreakdown};
 use crate::store::Store;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -89,10 +89,11 @@ impl Store {
 
         // Per (session, model) aggregate over messages.
         let msql = format!(
-            "SELECT session_id, project, COALESCE(model,'unknown'), COUNT(*),
+            "SELECT session_id, project, COALESCE({m},'unknown'), COUNT(*),
                     SUM(input_tokens), SUM(output_tokens), SUM(cache_read),
                     SUM(ephemeral_1h), SUM(ephemeral_5m), MIN(ts), MAX(ts)
-             FROM messages {w} GROUP BY session_id, model"
+             FROM messages {w} GROUP BY session_id, {m}",
+            m = price.model_sql()
         );
         let mut stmt = self.conn.prepare(&msql)?;
         let rows = stmt.query_map(bind(&binds).as_slice(), |r| {
@@ -119,6 +120,7 @@ impl Store {
             a.message_count += msgs;
             a.tokens += input + output;
             a.cost_usd += price.cost(&model, &tb);
+            let model = without_long(&model).to_string();
             if model != "unknown" && !a.models.contains(&model) {
                 a.models.push(model);
             }
@@ -211,22 +213,32 @@ impl Store {
         let cache_hit_ratio = if cacheable > 0.0 { tokens.cache_read as f64 / cacheable } else { 0.0 };
 
         // Per-model within the session.
-        let mut mstmt = self.conn.prepare(
-            "SELECT COALESCE(model,'unknown'), COUNT(*), SUM(input_tokens), SUM(output_tokens),
+        let mut mstmt = self.conn.prepare(&format!(
+            "SELECT COALESCE({m},'unknown'), COUNT(*), SUM(input_tokens), SUM(output_tokens),
                     SUM(cache_read), SUM(ephemeral_1h), SUM(ephemeral_5m)
-             FROM messages WHERE session_id = ?1 AND dup = 0 GROUP BY model ORDER BY 3 DESC",
-        )?;
+             FROM messages WHERE session_id = ?1 AND dup = 0 GROUP BY {m} ORDER BY 3 DESC",
+            m = price.model_sql()
+        ))?;
         let mrows = mstmt.query_map(rusqlite::params![session_id], |r| {
             Ok((
                 r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?,
                 r.get::<_, i64>(4)?, r.get::<_, i64>(5)?, r.get::<_, i64>(6)?,
             ))
         })?;
-        let mut by_model = Vec::new();
+        let mut by_model: Vec<SessionModel> = Vec::new();
         for row in mrows {
             let (model, msgs, input, output, cr, e1h, e5m) = row?;
             let tb = TokenBreakdown { input, output, cache_creation_5m: e5m, cache_creation_1h: e1h, cache_read: cr, ..Default::default() };
-            by_model.push(SessionModel { cost_usd: price.cost(&model, &tb), model, messages: msgs, tokens: input + output });
+            let cost_usd = price.cost(&model, &tb);
+            let name = without_long(&model);
+            match by_model.iter_mut().find(|b| b.model == name) {
+                Some(b) => {
+                    b.messages += msgs;
+                    b.tokens += input + output;
+                    b.cost_usd += cost_usd;
+                }
+                None => by_model.push(SessionModel { model: name.to_string(), messages: msgs, tokens: input + output, cost_usd }),
+            }
         }
 
         // Events: assistant messages + tool calls, merged & time-ordered.

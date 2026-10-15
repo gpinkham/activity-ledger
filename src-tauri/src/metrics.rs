@@ -1,4 +1,4 @@
-use crate::pricing::{PriceTable, TokenBreakdown};
+use crate::pricing::{without_long, PriceTable, TokenBreakdown};
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
 
@@ -90,10 +90,11 @@ pub(crate) fn bind<'a>(binds: &'a [(String, String)]) -> Vec<(&'a str, &'a dyn r
 impl Store {
     pub fn totals(&self, price: &PriceTable, f: &Filters) -> rusqlite::Result<Totals> {
         let (w, binds) = where_clause(f);
+        let m = price.model_sql();
         let sql = format!(
-            "SELECT model, SUM(input_tokens), SUM(output_tokens), SUM(cache_creation), SUM(cache_read),
+            "SELECT {m}, SUM(input_tokens), SUM(output_tokens), SUM(cache_creation), SUM(cache_read),
                     SUM(ephemeral_1h), SUM(ephemeral_5m), COUNT(*)
-             FROM messages {w} GROUP BY model"
+             FROM messages {w} GROUP BY {m}"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(bind(&binds).as_slice(), |r| {
@@ -126,10 +127,11 @@ impl Store {
 
     pub fn by_model(&self, price: &PriceTable, f: &Filters) -> rusqlite::Result<Vec<ByModel>> {
         let (w, binds) = where_clause(f);
+        let m = price.model_sql();
         let sql = format!(
-            "SELECT model, COUNT(*), SUM(input_tokens+output_tokens), SUM(input_tokens), SUM(output_tokens),
+            "SELECT {m}, COUNT(*), SUM(input_tokens+output_tokens), SUM(input_tokens), SUM(output_tokens),
                     SUM(cache_read), SUM(ephemeral_1h), SUM(ephemeral_5m)
-             FROM messages {w} GROUP BY model ORDER BY 3 DESC"
+             FROM messages {w} GROUP BY {m} ORDER BY 3 DESC"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(bind(&binds).as_slice(), |r| {
@@ -139,12 +141,23 @@ impl Store {
                 r.get::<_, i64>(5)?, r.get::<_, i64>(6)?, r.get::<_, i64>(7)?,
             ))
         })?;
-        let mut out = Vec::new();
+        let mut out: Vec<ByModel> = Vec::new();
         for row in rows {
             let (model, msgs, tokens, input, output, cr, e1h, e5m) = row?;
             let tb = TokenBreakdown { input, output, cache_creation_5m: e5m, cache_creation_1h: e1h, cache_read: cr, ..Default::default() };
-            out.push(ByModel { cost_usd: price.cost(&model, &tb), model, messages: msgs, tokens });
+            let cost_usd = price.cost(&model, &tb);
+            // A model's long prompts are priced apart but shown in its own row.
+            let name = without_long(&model);
+            match out.iter_mut().find(|b| b.model == name) {
+                Some(b) => {
+                    b.messages += msgs;
+                    b.tokens += tokens;
+                    b.cost_usd += cost_usd;
+                }
+                None => out.push(ByModel { model: name.to_string(), messages: msgs, tokens, cost_usd }),
+            }
         }
+        out.sort_by(|a, b| b.tokens.cmp(&a.tokens));
         Ok(out)
     }
 
@@ -161,9 +174,10 @@ impl Store {
     pub fn by_day(&self, price: &PriceTable, f: &Filters) -> rusqlite::Result<Vec<ByDay>> {
         let (w, binds) = where_clause(f);
         let sql = format!(
-            "SELECT substr(ts,1,10) AS day, model, COUNT(*), SUM(input_tokens), SUM(output_tokens),
+            "SELECT substr(ts,1,10) AS day, {m}, COUNT(*), SUM(input_tokens), SUM(output_tokens),
                     SUM(cache_read), SUM(ephemeral_1h), SUM(ephemeral_5m)
-             FROM messages {w} GROUP BY day, model ORDER BY day"
+             FROM messages {w} GROUP BY day, {m} ORDER BY day",
+            m = price.model_sql()
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(bind(&binds).as_slice(), |r| {
@@ -191,9 +205,10 @@ impl Store {
         f2.project = None;
         let (w, binds) = where_clause(&f2);
         let msql = format!(
-            "SELECT project, model, SUM(input_tokens), SUM(output_tokens),
+            "SELECT project, {m}, SUM(input_tokens), SUM(output_tokens),
                     SUM(cache_read), SUM(ephemeral_1h), SUM(ephemeral_5m)
-             FROM messages {w} GROUP BY project, model"
+             FROM messages {w} GROUP BY project, {m}",
+            m = price.model_sql()
         );
         let mut stmt = self.conn.prepare(&msql)?;
         let rows = stmt.query_map(bind(&binds).as_slice(), |r| {

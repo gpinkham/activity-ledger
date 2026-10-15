@@ -31,7 +31,10 @@ export function PriceTableEditor() {
       <tbody>
         {models.map(([model, price]) => (
           <tr key={model} className="border-t border-line/60">
-            <td className="py-1 pr-4 font-mono text-xs text-ink">{model}</td>
+            <td className="py-1 pr-4 font-mono text-xs text-ink">
+              {model}
+              {price.note && <p className="font-sans text-muted max-w-md">{price.note}</p>}
+            </td>
             <td>
               <input type="number" step="0.01" defaultValue={price.input_per_m}
                 onBlur={(e) => update(model, "input_per_m", Number(e.target.value))}

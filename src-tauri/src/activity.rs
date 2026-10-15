@@ -7,7 +7,7 @@
 //! Costs are summed per label. Only labels, counts and costs leave this module.
 
 use crate::metrics::{bind, where_clause, Filters};
-use crate::pricing::{PriceTable, TokenBreakdown};
+use crate::pricing::{without_long, PriceTable, TokenBreakdown};
 use crate::settings::AppSettings;
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
@@ -466,9 +466,10 @@ impl Store {
         let mut unknown: Vec<String> = Vec::new();
         {
             let sql = format!(
-                "SELECT session_id, ts, COALESCE(model,''), input_tokens, output_tokens, cache_creation, cache_read,
+                "SELECT session_id, ts, COALESCE({},''), input_tokens, output_tokens, cache_creation, cache_read,
                         ephemeral_1h, ephemeral_5m, web_searches, file
                  FROM messages {}",
+                price.model_sql(),
                 with_clause(&w, "role = 'assistant'")
             );
             let mut st = self.conn.prepare(&sql)?;
@@ -480,8 +481,9 @@ impl Store {
                 ))
             })? {
                 let (sid, ts, model, input, output, cc, cr, e1h, e5m, web, file) = r?;
-                if !model.is_empty() && !model.starts_with('<') && !price.is_known(&model) && !unknown.contains(&model) {
-                    unknown.push(model.clone());
+                let name = without_long(&model);
+                if !name.is_empty() && !name.starts_with('<') && !price.is_known(name) && !unknown.iter().any(|u| u == name) {
+                    unknown.push(name.to_string());
                 }
                 let key = if sub_by_file.contains_key(&file) {
                     sub_segment(&file, &sid, &ts, &mut segments)
@@ -649,15 +651,16 @@ impl Store {
     /// its process start to the snapshot), against the snapshot's own total. Honours
     /// the project filter only: a date range would cut sessions in two.
     fn reconcile(&self, price: &PriceTable, f: &Filters) -> rusqlite::Result<Reconcile> {
-        let mut sql = String::from(
+        let mut sql = format!(
             // One window per (session, process start): an exact copy of a file holds
             // the same snapshot and must not count twice.
-            "SELECT m.session_id || '|' || c.from_ts, COALESCE(m.model,''), m.input_tokens, m.output_tokens, m.cache_read,
+            "SELECT m.session_id || '|' || c.from_ts, COALESCE({},''), m.input_tokens, m.output_tokens, m.cache_read,
                     m.ephemeral_1h, m.ephemeral_5m, m.web_searches, c.total
              FROM messages m
              JOIN (SELECT session_id, from_ts, MAX(to_ts) AS to_ts, MAX(total_cost_usd) AS total
                    FROM cost_states GROUP BY session_id, from_ts) c ON c.session_id = m.session_id
              WHERE m.role = 'assistant' AND m.dup = 0 AND m.ts >= c.from_ts AND m.ts <= c.to_ts",
+            price.model_sql()
         );
         let project = f.project.clone().unwrap_or_default();
         if f.project.is_some() {
@@ -847,6 +850,52 @@ mod tests {
         assert!((r.reconcile.ours_usd - usd(14000)).abs() < 1e-9);
         assert!((r.reconcile.claude_code_usd - 0.02).abs() < 1e-9);
         assert!(r.unknown_models.is_empty(), "the dated Haiku id matches its family");
+    }
+
+    #[test]
+    fn haiku_5_5_prompts_over_100k_are_priced_apart_in_every_rollup() {
+        // The prompt is input + cache write + cache read: exactly 100,000 is the low tier,
+        // one token more the high one. Opus 5.5 has one price whatever the prompt size.
+        let at = |id: &str, model: &str, sec: u32, input: i64, read: i64| json!({"type":"assistant","sessionId":"s-h","timestamp":format!("2026-10-05T10:00:0{sec}.000Z"),
+            "message":{"id":id,"role":"assistant","model":model,"usage":{"input_tokens":input,"output_tokens":1000,"cache_read_input_tokens":read}}});
+        let content = lines(&[
+            prompt("s-h", "2026-10-05T10:00:00.000Z", "go"),
+            at("h1", "claude-haiku-5-5", 1, 100_000, 0),
+            at("h2", "claude-haiku-5-5", 2, 60_000, 40_001),
+            at("h3", "claude-haiku-5-5-20261001", 3, 150_000, 0),
+            at("o1", "claude-opus-5-5", 4, 200_000, 0),
+            json!({"type":"cost-state","sessionId":"s-h","totalCostUSD":1.0,"startTime":1791190800000i64}),
+        ]);
+        let mut store = Store::open_in_memory();
+        let sf = ScannedFile { path: "/x/p/s-h.jsonl".into(), project: "p".into(), size: 1, mtime: 1, subagent: None };
+        store.replace_file(&sf, &parse_str("p", &content)).unwrap();
+        store.rebuild_sessions().unwrap();
+        let (p, f) = (PriceTable::seed(), Filters::default());
+        // h1 $0.0105 at $0.10/$0.50; h2 $0.03450005 and h3 $0.0775 at $0.50/$2.50 (h2's
+        // reads at 0.1x); o1 $0.82 at $4/$20.
+        let haiku = 0.0105 + 0.03450005;
+        let total = haiku + 0.0775 + 0.82;
+        let near = |got: f64, want: f64, what: &str| assert!((got - want).abs() < 1e-9, "{what}: {got} != {want}");
+        near(store.totals(&p, &f).unwrap().est_cost_usd, total, "totals");
+        let models = store.by_model(&p, &f).unwrap();
+        assert!(models.iter().all(|m| !m.model.contains(':')), "the tier is not a model of its own");
+        let h = models.iter().find(|m| m.model == "claude-haiku-5-5").unwrap();
+        assert_eq!(h.messages, 2);
+        near(h.cost_usd, haiku, "by model");
+        near(store.by_day(&p, &f).unwrap().iter().map(|d| d.cost_usd).sum(), total, "by day");
+        near(store.by_project(&p, &f).unwrap().iter().map(|d| d.cost_usd).sum(), total, "by project");
+        let s = &store.get_sessions(&p, &f).unwrap()[0];
+        near(s.cost_usd, total, "session");
+        assert!(s.models.iter().all(|m| !m.contains(':')), "{:?}", s.models);
+        let d = store.get_session_detail(&p, "s-h").unwrap();
+        let h = d.by_model.iter().find(|m| m.model == "claude-haiku-5-5").unwrap();
+        assert_eq!(h.messages, 2, "{:?}", d.by_model.iter().map(|m| &m.model).collect::<Vec<_>>());
+        near(h.cost_usd, haiku, "session detail, Haiku 5.5");
+        near(d.by_model.iter().map(|m| m.cost_usd).sum(), total, "session detail");
+        let r = store.activity(&p, &f, &AppSettings::default()).unwrap();
+        near(r.totals.cost_usd, total, "activity");
+        near(r.reconcile.ours_usd, total, "reconcile");
+        assert!(r.unknown_models.is_empty(), "no default-row banner: {:?}", r.unknown_models);
     }
 
     #[test]

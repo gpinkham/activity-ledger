@@ -22,6 +22,7 @@ export interface Workflow {
 export interface ModelPrice {
   input_per_m: number; output_per_m: number;
   cache_read_per_m?: number | null; fast_input_per_m?: number | null; fast_output_per_m?: number | null;
+  long_prompt?: { above_tokens: number; input_per_m: number; output_per_m: number } | null; note?: string | null;
 }
 export type FastMode = "auto" | "never" | "always";
 export interface PriceTable {
