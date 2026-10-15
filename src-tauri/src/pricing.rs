@@ -157,12 +157,18 @@ impl PriceTable {
         }
     }
 
-    /// A saved table, or the seed when there is none or it does not parse.
+    /// A saved table, or the seed when there is none or it does not parse. A saved
+    /// table gains the seed rows it lacks (models priced since it was saved); the
+    /// rows it has are kept as they are.
     pub fn load_or_seed(path: &Path) -> PriceTable {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_else(PriceTable::seed)
+        let seed = PriceTable::seed();
+        let Some(mut t) = std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str::<PriceTable>(&s).ok()) else {
+            return seed;
+        };
+        for (k, p) in seed.models {
+            t.models.entry(k).or_insert(p);
+        }
+        t
     }
 
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
@@ -400,6 +406,26 @@ mod tests {
         let t: PriceTable = serde_json::from_str(old).unwrap();
         let back = serde_json::to_string(&t.models["m"]).unwrap();
         assert!(!back.contains("long_prompt") && !back.contains("note"), "{back}");
+    }
+
+    #[test]
+    fn a_saved_table_gains_new_seed_rows_and_keeps_its_own() {
+        let dir = std::env::temp_dir().join(format!("ci_price_rows_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("prices.json");
+        // Saved before Haiku 5.5 was priced, with one row edited by hand.
+        let mut old = PriceTable::seed();
+        old.models.remove("claude-haiku-5-5");
+        old.models.get_mut("claude-opus-5-5").unwrap().input_per_m = 3.0;
+        old.us_only = true;
+        old.save(&path).unwrap();
+        let t = PriceTable::load_or_seed(&path);
+        assert!(t.is_known("claude-haiku-5-5") && t.model_sql().contains("100000"));
+        let tb = TokenBreakdown { input: 1_000_000, output: 1_000_000, ..Default::default() };
+        assert!((t.cost("claude-haiku-5-5", &tb) - 0.60 * 1.1).abs() < 1e-9);
+        assert_eq!(t.models["claude-opus-5-5"].input_per_m, 3.0, "a saved row is never overwritten");
+        assert!(t.us_only);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
