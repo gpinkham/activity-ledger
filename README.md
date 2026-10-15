@@ -8,9 +8,7 @@ Activity Ledger is made by Pinkham Software. It is not made, endorsed or support
 
 Figures are estimates at Anthropic's published API list prices. They are not an invoice, and they are not your plan's usage.
 
-<!-- SCREENSHOTS: add before the repository is public, under docs/screenshots/:
-     overview.png, activity-tool-labels.png, activity-llm-labels.png,
-     then show them here with ![Cost by activity](docs/screenshots/activity-tool-labels.png). -->
+![Overview: totals and estimated cost over time](docs/screenshots/overview.png)
 
 ## What it shows
 
@@ -42,12 +40,16 @@ The app asks the model for a JSON answer limited to the label list (Ollama's str
 
 **A toggle.** On Cost by activity, switch between **Tool labels** and **LLM labels**. The totals are the same in both views. Segments the model has not labelled yet are shown as "not labelled by the model", so nothing is dropped or double counted.
 
+![Cost by activity, Tool labels](docs/screenshots/activity-tool-labels.png)
+
 ## Privacy
 
 - The app reads Claude Code's transcripts in `~/.claude/projects` on this machine. It never changes them.
 - Its cache (a SQLite file in the app's data folder) keeps counts, token totals, costs, timestamps, tool names, labels, model names, the Claude Code version, git branch names, message and tool call ids, the session titles Claude Code wrote, and the project folder and transcript file each record came from. It does not keep your prompts, Claude's replies, tool inputs or commands. Tool inputs are read in memory only to decide a tag such as "test run".
 - The only network call is the optional labelling pass, to your Ollama. By default it must be on this machine (a loopback address). A remote host is used only if you tick "Allow a remote Ollama". For each segment it sends tool counts and a short excerpt of the opening prompt. Only the label that comes back is kept.
 - No telemetry, no accounts, no calls to Anthropic or anyone else.
+
+![Local model settings](docs/screenshots/privacy-settings.png)
 
 ## Install
 
