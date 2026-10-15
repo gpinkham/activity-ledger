@@ -78,14 +78,19 @@ pub struct ToolCallRecord {
     pub test_key: Option<String>,
 }
 
-/// An inbound prompt: where one work segment starts. Only its kind is kept.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// An inbound prompt: where one work segment starts. Only its kind is kept, and
+/// for a harness's own prompt the trigger label and the log message ids it names.
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
 pub struct PromptRecord {
     pub session_id: String,
     pub agent_id: Option<String>,
     pub ts: String,
     /// human | compact | resume | task-notification
     pub kind: String,
+    /// The trigger file's label for this opening line (triggers.rs), if any.
+    pub trigger: Option<String>,
+    /// Log message ids the prompt names, comma separated.
+    pub msg_ids: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

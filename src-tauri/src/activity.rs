@@ -99,6 +99,16 @@ pub struct DayActivity {
     pub cost_usd: f64,
 }
 
+/// One row of the By trigger table: what started the segments, and how much of
+/// their cost was the work rather than the harness's upkeep (rule labels).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct TriggerRow {
+    pub trigger: String,
+    pub segments: i64,
+    pub cost_usd: f64,
+    pub work_usd: f64,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Default)]
 pub struct ActivityTotals {
     pub cost_usd: f64,
@@ -134,6 +144,8 @@ pub struct Reconcile {
 pub struct ActivityReport {
     pub rows: Vec<ActivityRow>,
     pub by_day: Vec<DayActivity>,
+    /// Largest cost first.
+    pub by_trigger: Vec<TriggerRow>,
     pub totals: ActivityTotals,
     pub reconcile: Reconcile,
     /// Model ids priced at the default row because the table does not know them.
@@ -157,6 +169,8 @@ pub(crate) struct ToolMix {
     pub(crate) pr: i64,
     /// Work tool calls none of the counts above see (a question, a monitor, an MCP tool).
     pub(crate) other: i64,
+    /// Calls on a harness's own files (triggers.rs): its inbox, memory, board.
+    pub(crate) bookkeeping: i64,
     /// Consecutive failing test runs so far, and the longest such run.
     pub(crate) fail_streak: i64,
     pub(crate) max_fail_streak: i64,
@@ -175,6 +189,10 @@ impl ToolMix {
                 // A passing run ends the streak; an unknown outcome is not a failure.
                 _ => self.fail_streak = 0,
             }
+        }
+        if tag == Some("bookkeeping") {
+            self.bookkeeping += 1;
+            return;
         }
         let mut counted = true;
         match tag {
@@ -207,9 +225,9 @@ impl ToolMix {
         }
     }
 
-    /// Tool calls that do the task itself, not turn plumbing.
-    fn work(&self) -> i64 {
-        self.total - self.meta
+    /// Tool calls that do the task itself, not turn plumbing or harness bookkeeping.
+    pub(crate) fn work(&self) -> i64 {
+        self.total - self.meta - self.bookkeeping
     }
 }
 
@@ -224,6 +242,9 @@ pub(crate) struct Segment {
     pub(crate) kind: String,
     pub(crate) calls: Vec<Call>,
     pub(crate) tools: ToolMix,
+    /// The harness trigger that opened it (triggers.rs): the log sender's label
+    /// for a message it delivered, else the opening line's label.
+    pub(crate) trigger: Option<String>,
     day: String,
     /// The opening prompt's timestamp and transcript file (None before any prompt).
     pub(crate) start: Option<(String, String)>,
@@ -240,6 +261,36 @@ fn classify(kind: &str, t: &ToolMix) -> String {
         return "compaction".into();
     }
     classify_by_tools(t).into()
+}
+
+/// The label with a harness trigger, and whether it is overhead. A triggered
+/// segment that did only bookkeeping or planning is that trigger's upkeep; once it
+/// does the work, it is that work.
+fn classify_triggered(kind: &str, trigger: Option<&str>, t: &ToolMix) -> (String, bool) {
+    match trigger {
+        Some(label) if kind != "compact" && t.work() == 0 => (label.to_string(), true),
+        _ => {
+            let l = classify(kind, t);
+            let overhead = group_of(&l) == "overhead";
+            (l, overhead)
+        }
+    }
+}
+
+/// What started a segment, for the By trigger table.
+fn trigger_name(kind: &str, trigger: Option<&str>) -> String {
+    if let Some(t) = trigger {
+        return t.to_string();
+    }
+    match kind {
+        "human" => "typed prompt",
+        "compact" => "compaction",
+        "resume" => "resumed session",
+        "task-notification" => "task notification",
+        "none" => "before any prompt",
+        other => other,
+    }
+    .to_string()
 }
 
 fn classify_by_tools(t: &ToolMix) -> &'static str {
@@ -309,35 +360,42 @@ impl Store {
         }
 
         // Segment boundaries per session (main thread only).
-        let mut bounds: HashMap<String, Vec<(String, String, String)>> = HashMap::new();
+        type Bound = (String, String, String, Option<String>);
+        let mut bounds: HashMap<String, Vec<Bound>> = HashMap::new();
         {
-            let sql = format!("SELECT session_id, ts, kind, file FROM prompts {} ORDER BY ts", with_clause(&pw, "agent_id IS NULL"));
+            let sql = format!("SELECT session_id, ts, kind, file, trigger, msg_ids FROM prompts {} ORDER BY ts", with_clause(&pw, "agent_id IS NULL"));
             let mut st = self.conn.prepare(&sql)?;
             for r in st.query_map(bind(&pbinds).as_slice(), |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
+                Ok((
+                    r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?,
+                    r.get::<_, Option<String>>(4)?, r.get::<_, Option<String>>(5)?,
+                ))
             })? {
-                let (sid, ts, kind, file) = r?;
-                bounds.entry(sid).or_default().push((ts, kind, file));
+                let (sid, ts, kind, file, trigger, ids) = r?;
+                // A message the harness log labels (a standup, a scheduled job) names the trigger.
+                let from_log = ids.as_deref().and_then(|ids| ids.split(',').find_map(|id| self.sender_labels.get(id).cloned()));
+                bounds.entry(sid).or_default().push((ts, kind, file, from_log.or(trigger)));
             }
         }
 
         let mut segments: BTreeMap<(String, i64), Segment> = BTreeMap::new();
         let segment_for = |session: &str, ts: &str, segments: &mut BTreeMap<(String, i64), Segment>| -> (String, i64) {
             let list = bounds.get(session).map(|v| v.as_slice()).unwrap_or(&[]);
-            let idx = list.partition_point(|(pts, _, _)| pts.as_str() <= ts) as i64 - 1;
+            let idx = list.partition_point(|(pts, _, _, _)| pts.as_str() <= ts) as i64 - 1;
             let key = (session.to_string(), idx);
             segments.entry(key.clone()).or_insert_with(|| {
-                let (kind, start) = if idx >= 0 {
-                    let (pts, k, file) = &list[idx as usize];
-                    (k.clone(), Some((pts.clone(), file.clone())))
+                let (kind, start, trigger) = if idx >= 0 {
+                    let (pts, k, file, trigger) = &list[idx as usize];
+                    (k.clone(), Some((pts.clone(), file.clone())), trigger.clone())
                 } else {
-                    ("none".to_string(), None)
+                    ("none".to_string(), None, None)
                 };
                 Segment {
                     session: session.to_string(),
                     kind,
                     calls: Vec::new(),
                     tools: ToolMix::default(),
+                    trigger,
                     day: ts.get(..10).unwrap_or("").to_string(),
                     start,
                 }
@@ -456,17 +514,18 @@ impl Store {
         struct Acc { row: ActivityRow, ctx: Vec<i64>, out: Vec<i64> }
         let mut by_label: HashMap<String, Acc> = HashMap::new();
         let mut by_day: BTreeMap<(String, String), f64> = BTreeMap::new();
+        let mut by_trigger: HashMap<String, TriggerRow> = HashMap::new();
         let mut totals = ActivityTotals::default();
 
         for seg in segments.values() {
             if seg.calls.is_empty() {
                 continue; // no API call answered it, so it cost nothing
             }
-            let rule = classify(&seg.kind, &seg.tools);
+            let (rule, rule_overhead) = classify_triggered(&seg.kind, seg.trigger.as_deref(), &seg.tools);
             let key = segment_key(&seg.session, seg.start.as_ref().map(|(ts, _)| ts.as_str()));
             let ml = model_labels.get(&key);
             let (label, group) = match source {
-                LabelSource::Rule => { let g = group_of(&rule); (rule.clone(), g) }
+                LabelSource::Rule => (rule.clone(), if rule_overhead { "overhead" } else { "work" }),
                 LabelSource::Model => {
                     let l = ml.cloned().unwrap_or_else(|| UNLABELLED.to_string());
                     let g = model_group(&l);
@@ -503,6 +562,13 @@ impl Store {
                 acc.out.push(c.tb.output);
             }
             acc.row.cost_usd += seg_cost;
+            let name = trigger_name(&seg.kind, seg.trigger.as_deref());
+            let tr = by_trigger.entry(name.clone()).or_insert_with(|| TriggerRow { trigger: name, segments: 0, cost_usd: 0.0, work_usd: 0.0 });
+            tr.segments += 1;
+            tr.cost_usd += seg_cost;
+            if !rule_overhead {
+                tr.work_usd += seg_cost;
+            }
             totals.cost_usd += seg_cost;
             totals.calls += seg.calls.len() as i64;
             totals.segments += 1;
@@ -563,8 +629,11 @@ impl Store {
         let reconcile = self.reconcile(price, f)?;
 
         unknown.sort();
+        let mut by_trigger: Vec<TriggerRow> = by_trigger.into_values().collect();
+        by_trigger.sort_by(|a, b| b.cost_usd.partial_cmp(&a.cost_usd).unwrap().then_with(|| a.trigger.cmp(&b.trigger)));
         Ok(ActivityReport {
             rows,
+            by_trigger,
             by_day: by_day.into_iter().map(|((day, activity), cost_usd)| DayActivity { day, activity: activity.into(), cost_usd }).collect(),
             totals,
             reconcile,
@@ -977,6 +1046,70 @@ mod tests {
         // Reading alone is still review / explore.
         assert_eq!(classify("human", &seq(&[read, read, read])), "review / explore");
         assert_eq!(group_of("code review"), "work");
+    }
+
+    /// One harness session: upkeep, upkeep that turns into work, a standup from the
+    /// log, memory upkeep, a scheduled job that does the work, and a typed prompt.
+    fn harness_lines() -> String {
+        let wake = |ids: &str| format!("You have new hive inbox message(s) \u{2014} at least: {ids}. Read your inbox, act on what is pending there.");
+        lines(&[
+            prompt("s-h", "2026-10-03T10:00:00.000Z", &wake("m1")),
+            call("s-h", "2026-10-03T10:00:01.000Z", "h1", 1000, &[("h1a", "Bash", json!({"command":"mv inbox/m1.json inbox/.done/"})),
+                ("h1b", "Write", json!({"file_path":"/h/agents/a/outbox/r.json"})), ("h1c", "TodoWrite", json!({}))]),
+            prompt("s-h", "2026-10-03T11:00:00.000Z", &wake("m2")),
+            call("s-h", "2026-10-03T11:00:01.000Z", "h2", 2000, &[("h2a", "Read", json!({"file_path":"/h/agents/a/inbox/m2.json"})),
+                ("h2b", "Edit", json!({"file_path":"/r/src/lib.rs"}))]),
+            prompt("s-h", "2026-10-03T12:00:00.000Z", &wake("s1")),
+            call("s-h", "2026-10-03T12:00:01.000Z", "h3", 4000, &[("h3a", "Read", json!({"file_path":"/h/board.md"}))]),
+            prompt("s-h", "2026-10-03T13:00:00.000Z", "You are compacting one AI agent's long-term memory file. You will receive:"),
+            call("s-h", "2026-10-03T13:00:01.000Z", "h4", 8000, &[]),
+            prompt("s-h", "2026-10-03T14:00:00.000Z", &wake("j1")),
+            call("s-h", "2026-10-03T14:00:01.000Z", "h5", 16000, &[("h5a", "Edit", json!({"file_path":"/r/src/main.rs"})), ("h5b", "Edit", json!({"file_path":"/h/agents/a/memory.md"}))]),
+            prompt("s-h", "2026-10-03T15:00:00.000Z", "tidy the README"),
+            call("s-h", "2026-10-03T15:00:01.000Z", "h6", 32000, &[("h6a", "Edit", json!({"file_path":"/r/README.md"}))]),
+        ])
+    }
+    fn harness_store(config: &crate::triggers::TriggerConfig) -> Store {
+        let mut store = Store::open_in_memory();
+        let sf = ScannedFile { path: "/x/h/s-h.jsonl".into(), project: "h".into(), size: 1, mtime: 1, subagent: None };
+        store.replace_file(&sf, &crate::parser::parse_with("h", &harness_lines(), &config.matcher())).unwrap();
+        store.sender_labels = [("s1", "standup"), ("j1", "scheduled job")].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+        store.rebuild_sessions().unwrap();
+        store
+    }
+
+    #[test]
+    fn a_harness_trigger_is_overhead_until_the_segment_does_the_work() {
+        let mut on = crate::triggers::TriggerConfig::default();
+        on.adapters[0].enabled = true;
+        let r = harness_store(&on).activity(&PriceTable::seed(), &Filters::default(), &AppSettings::default()).unwrap();
+        let cost = |l: &str| r.rows.iter().find(|x| x.activity == l).map(|x| (x.group.as_str(), x.segments, (x.cost_usd * 1e6).round() as i64));
+        // Haiku 4.5 input $1/MTok and 100 output tokens at $5/MTok: 500 per call in these units.
+        assert_eq!(cost("inbox handling"), Some(("overhead", 1, 1500)), "moved its mail, wrote a reply: upkeep");
+        assert_eq!(cost("standup"), Some(("overhead", 1, 4500)), "the log names the sender: a standup");
+        assert_eq!(cost("memory upkeep"), Some(("overhead", 1, 8500)), "an opening line alone");
+        assert_eq!(cost("coding"), Some(("work", 3, 2500 + 16500 + 32500)), "a wake or a job that does the work is that work");
+        assert!((r.totals.overhead_usd * 1e6 - 14500.0).abs() < 1e-6, "{}", r.totals.overhead_usd);
+        let t = |name: &str| r.by_trigger.iter().find(|x| x.trigger == name).map(|x| (x.segments, (x.cost_usd * 1e6).round() as i64, (x.work_usd * 1e6).round() as i64));
+        assert_eq!(t("inbox handling"), Some((2, 4000, 2500)), "the trigger stays visible when the work was done");
+        assert_eq!(t("scheduled job"), Some((1, 16500, 16500)));
+        assert_eq!(t("standup"), Some((1, 4500, 0)));
+        assert_eq!(t("typed prompt"), Some((1, 32500, 32500)));
+        assert!((r.by_trigger.iter().map(|x| x.cost_usd).sum::<f64>() - r.totals.cost_usd).abs() < 1e-9);
+    }
+
+    #[test]
+    fn with_the_adapter_off_nothing_changes() {
+        let off = harness_store(&crate::triggers::TriggerConfig::default());
+        let r = off.activity(&PriceTable::seed(), &Filters::default(), &AppSettings::default()).unwrap();
+        let mut plain = Store::open_in_memory();
+        let sf = ScannedFile { path: "/x/h/s-h.jsonl".into(), project: "h".into(), size: 1, mtime: 1, subagent: None };
+        plain.replace_file(&sf, &parse_str("h", &harness_lines())).unwrap();
+        plain.rebuild_sessions().unwrap();
+        let p = plain.activity(&PriceTable::seed(), &Filters::default(), &AppSettings::default()).unwrap();
+        assert_eq!(r.rows, p.rows, "an adapter that is off is the same as none");
+        assert_eq!(r.totals.overhead_usd, 0.0, "no compaction here, so no overhead");
+        assert!(r.by_trigger.iter().all(|x| x.trigger == "typed prompt"), "{:?}", r.by_trigger);
     }
 
     #[test]

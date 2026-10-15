@@ -1,10 +1,13 @@
 use crate::models::ParsedFile;
 use crate::scanner::ScannedFile;
 use rusqlite::{params, Connection};
+use std::collections::HashMap;
 use std::path::Path;
 
 pub struct Store {
     pub conn: Connection,
+    /// Harness log message id -> label (triggers.rs), set on refresh. Not stored.
+    pub sender_labels: HashMap<String, String>,
 }
 
 const SCHEMA: &str = r#"
@@ -72,6 +75,8 @@ CREATE TABLE IF NOT EXISTS prompts (
     agent_id TEXT,
     ts TEXT NOT NULL,
     kind TEXT NOT NULL,
+    trigger TEXT,
+    msg_ids TEXT,
     dup INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_prompts_file ON prompts(file);
@@ -112,11 +117,15 @@ CREATE TABLE IF NOT EXISTS session_titles (
 
 /// Bump when a stored table changes shape. An older cache is dropped and every
 /// transcript re-read (the cache is derived data; the transcripts are the truth).
-const SCHEMA_VERSION: &str = "9";
+const SCHEMA_VERSION: &str = "10";
 const DATA_TABLES: &str = "DROP TABLE IF EXISTS messages; DROP TABLE IF EXISTS tool_calls;
     DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS session_titles; DROP TABLE IF EXISTS files;
     DROP TABLE IF EXISTS prompts; DROP TABLE IF EXISTS subagents; DROP TABLE IF EXISTS cost_states;
     DROP TABLE IF EXISTS segment_model_labels;";
+/// What a re-parse rebuilds: everything read from the transcripts.
+const PARSED_TABLES: &str = "DROP TABLE IF EXISTS messages; DROP TABLE IF EXISTS tool_calls;
+    DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS session_titles; DROP TABLE IF EXISTS files;
+    DROP TABLE IF EXISTS prompts; DROP TABLE IF EXISTS subagents; DROP TABLE IF EXISTS cost_states;";
 
 impl Store {
     fn init(conn: Connection) -> rusqlite::Result<Store> {
@@ -133,10 +142,30 @@ impl Store {
             )?;
         }
         conn.execute_batch(SCHEMA)?;
-        let store = Store { conn };
+        let store = Store { conn, sender_labels: HashMap::new() };
         store.ensure_meta("machine_id")?;
         store.ensure_meta("export_salt")?;
         Ok(store)
+    }
+
+    /// Use the trigger file's parse settings. When they differ from those the
+    /// cache was read with, the transcripts are read again on the next refresh
+    /// (model labels are kept). Returns whether that happened.
+    pub fn use_triggers(&self, fingerprint: &str) -> rusqlite::Result<bool> {
+        let stored: String = self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = 'triggers'", [], |r| r.get(0))
+            .unwrap_or_default();
+        if stored == fingerprint {
+            return Ok(false);
+        }
+        self.conn.execute_batch(PARSED_TABLES)?;
+        self.conn.execute_batch(SCHEMA)?;
+        self.conn.execute(
+            "INSERT INTO meta(key, value) VALUES ('triggers', ?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![fingerprint],
+        )?;
+        Ok(true)
     }
 
     pub fn open_in_memory() -> Store {
@@ -219,9 +248,9 @@ impl Store {
         }
         for p in &parsed.prompts {
             tx.execute(
-                "INSERT INTO prompts(file, session_id, project, agent_id, ts, kind)
-                 VALUES (?1,?2,?3,?4,?5,?6)",
-                params![path, p.session_id, sf.project, p.agent_id, p.ts, p.kind],
+                "INSERT INTO prompts(file, session_id, project, agent_id, ts, kind, trigger, msg_ids)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![path, p.session_id, sf.project, p.agent_id, p.ts, p.kind, p.trigger, p.msg_ids],
             )?;
         }
         if let Some(meta) = &sf.subagent {
@@ -294,6 +323,21 @@ mod tests {
     use super::*;
     use crate::parser::parse_str;
     use crate::scanner::SubagentMeta;
+
+    #[test]
+    fn a_new_trigger_file_means_the_transcripts_are_read_again_and_model_labels_stay() {
+        let store = seed();
+        store.save_model_label("s|t", "m", "coding").unwrap();
+        assert!(!store.use_triggers("").unwrap(), "no adapter on: the cache as it is");
+        let path: String = store.conn.query_row("SELECT path FROM files LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert!(!store.needs_parse(&path, 123, 456));
+        assert!(store.use_triggers("md-on").unwrap(), "an adapter turned on changes what is parsed");
+        assert!(store.needs_parse(&path, 123, 456), "so every file is read again");
+        let n: i64 = store.conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0);
+        assert_eq!(store.model_labels("m").unwrap().len(), 1, "model labels are kept");
+        assert!(!store.use_triggers("md-on").unwrap(), "the same file again: nothing to do");
+    }
 
     fn seed() -> Store {
         let mut store = Store::open_in_memory();

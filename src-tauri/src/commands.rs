@@ -2,12 +2,13 @@ use crate::activity::{ActivityReport, LabelSource};
 use crate::exporter::build_bundle;
 use crate::labeller::{self, LabelProgress};
 use crate::metrics::{ByDay, ByModel, ByProject, ByTool, Filters, Totals, Workflow};
-use crate::parser::parse_str;
+use crate::parser::parse_with;
 use crate::pricing::PriceTable;
 use crate::scanner::scan_dir;
 use crate::sessions::{SessionDetail, SessionSummary};
 use crate::settings::AppSettings;
 use crate::store::Store;
+use crate::triggers::{Matcher, TriggerConfig};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,6 +25,63 @@ pub struct AppState {
     pub label_progress: Mutex<LabelProgress>,
     /// Set by Stop; cleared when a pass starts.
     pub label_stop: Arc<AtomicBool>,
+    /// The harness trigger file, its path, and why it could not be read, if so.
+    pub triggers: Mutex<TriggerConfig>,
+    pub triggers_path: PathBuf,
+    pub triggers_error: Option<String>,
+    pub home: Option<PathBuf>,
+}
+
+/// The trigger file as the settings card shows it.
+#[derive(Debug, Serialize)]
+pub struct TriggerStatus {
+    pub path: String,
+    pub error: Option<String>,
+    pub adapters: Vec<AdapterStatus>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdapterStatus {
+    pub name: String,
+    pub enabled: bool,
+    pub root: Option<String>,
+    /// Off, but its harness folder is on this machine: worth turning on.
+    pub found: bool,
+}
+
+fn trigger_status(state: &AppState, config: &TriggerConfig) -> TriggerStatus {
+    let found = config.found_off(state.home.as_deref());
+    TriggerStatus {
+        path: state.triggers_path.to_string_lossy().to_string(),
+        error: state.triggers_error.clone(),
+        adapters: config
+            .adapters
+            .iter()
+            .map(|a| AdapterStatus {
+                name: a.name.clone(),
+                enabled: a.enabled,
+                root: a.root.clone(),
+                found: found.iter().any(|(n, _)| *n == a.name),
+            })
+            .collect(),
+    }
+}
+
+#[tauri::command]
+pub fn get_triggers(state: tauri::State<AppState>) -> Result<TriggerStatus, String> {
+    let config = state.triggers.lock().map_err(|e| e.to_string())?;
+    Ok(trigger_status(&state, &config))
+}
+
+/// Turn an adapter on or off and save the file. The next refresh re-reads the
+/// transcripts with it.
+#[tauri::command]
+pub fn set_adapter_enabled(state: tauri::State<AppState>, name: String, enabled: bool) -> Result<TriggerStatus, String> {
+    let mut config = state.triggers.lock().map_err(|e| e.to_string())?;
+    let a = config.adapters.iter_mut().find(|a| a.name == name).ok_or_else(|| format!("no adapter named {name}"))?;
+    a.enabled = enabled;
+    config.save(&state.triggers_path).map_err(|e| e.to_string())?;
+    Ok(trigger_status(&state, &config))
 }
 
 #[derive(Debug, Serialize)]
@@ -34,6 +92,13 @@ pub struct RefreshSummary {
 
 /// Core refresh logic, decoupled from Tauri so it can be unit-tested.
 pub fn do_refresh(store: &mut Store, root: &Path) -> rusqlite::Result<RefreshSummary> {
+    do_refresh_with(store, root, &Matcher::default())
+}
+
+/// do_refresh with a harness trigger file's parse settings. When they changed
+/// since the cache was read, every transcript is read again.
+pub fn do_refresh_with(store: &mut Store, root: &Path, matcher: &Matcher) -> rusqlite::Result<RefreshSummary> {
+    store.use_triggers(&matcher.fingerprint())?;
     let scanned = scan_dir(root);
     let mut parsed_count = 0;
     for sf in &scanned {
@@ -45,7 +110,7 @@ pub fn do_refresh(store: &mut Store, root: &Path) -> rusqlite::Result<RefreshSum
             Ok(c) => c,
             Err(_) => continue,
         };
-        let parsed = parse_str(&sf.project, &content);
+        let parsed = parse_with(&sf.project, &content, matcher);
         store.replace_file(sf, &parsed)?;
         parsed_count += 1;
     }
@@ -55,8 +120,10 @@ pub fn do_refresh(store: &mut Store, root: &Path) -> rusqlite::Result<RefreshSum
 
 #[tauri::command]
 pub fn refresh(state: tauri::State<AppState>) -> Result<RefreshSummary, String> {
+    let config = state.triggers.lock().map_err(|e| e.to_string())?.clone();
     let mut store = state.store.lock().map_err(|e| e.to_string())?;
-    do_refresh(&mut store, &state.claude_root).map_err(|e| e.to_string())
+    store.sender_labels = config.sender_labels(state.home.as_deref());
+    do_refresh_with(&mut store, &state.claude_root, &config.matcher()).map_err(|e| e.to_string())
 }
 
 macro_rules! metric_cmd {

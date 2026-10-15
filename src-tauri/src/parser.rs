@@ -1,5 +1,6 @@
 use crate::models::{CostStateRecord, MessageRecord, ParsedFile, PromptRecord, RawUsage, ToolCallRecord};
 use crate::pricing::fast_key;
+use crate::triggers::Matcher;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
@@ -9,6 +10,12 @@ use std::collections::{BTreeMap, HashMap};
 /// Prompt text, tool inputs and outputs are read here only to decide a label (a
 /// prompt's kind, a tool call's tag); none of it is copied into a record.
 pub fn parse_str(project: &str, content: &str) -> ParsedFile {
+    parse_with(project, content, &Matcher::default())
+}
+
+/// parse_str with a harness trigger file: a matching opening line gets its
+/// trigger label, and a tool call on a bookkeeping file the tag "bookkeeping".
+pub fn parse_with(project: &str, content: &str, matcher: &Matcher) -> ParsedFile {
     let mut messages: Vec<MessageRecord> = Vec::new();
     let mut tool_calls = Vec::new();
     let mut prompts = Vec::new();
@@ -108,7 +115,7 @@ pub fn parse_str(project: &str, content: &str) -> ParsedFile {
         }
         if rec_type == "system" {
             if v.get("subtype").and_then(|s| s.as_str()) == Some("compact_boundary") {
-                prompts.push(PromptRecord { session_id, agent_id, ts, kind: "compact".into() });
+                prompts.push(PromptRecord { session_id, agent_id, ts, kind: "compact".into(), ..Default::default() });
             }
             continue;
         }
@@ -133,7 +140,12 @@ pub fn parse_str(project: &str, content: &str) -> ParsedFile {
         if rec_type == "user" {
             if let Some(kind) = prompt_kind(&v) {
                 turn_writes.clear();
-                prompts.push(PromptRecord { session_id: session_id.clone(), agent_id: agent_id.clone(), ts: ts.clone(), kind });
+                let hit = if kind == "human" { prompt_text(&v).and_then(|t| matcher.prompt(&t)) } else { None };
+                let (trigger, msg_ids) = match hit {
+                    Some((label, ids)) => (Some(label), (!ids.is_empty()).then(|| ids.join(","))),
+                    None => (None, None),
+                };
+                prompts.push(PromptRecord { session_id: session_id.clone(), agent_id: agent_id.clone(), ts: ts.clone(), kind, trigger, msg_ids });
             }
         }
 
@@ -201,6 +213,16 @@ pub fn parse_str(project: &str, content: &str) -> ParsedFile {
                     let is_mcp = name.starts_with("mcp__");
                     let mut tag = tool_tag_in(&name, block.get("input"), &cwd);
                     let input = block.get("input");
+                    // The harness's own files: bookkeeping, unless it is a test run or a review.
+                    if !matches!(tag.as_deref(), Some("test") | Some("review")) {
+                        let target = ["command", "file_path", "path", "notebook_path"]
+                            .iter()
+                            .find_map(|k| input.and_then(|i| i.get(*k)).and_then(|p| p.as_str()))
+                            .unwrap_or("");
+                        if matcher.is_bookkeeping(target) {
+                            tag = Some("bookkeeping".into());
+                        }
+                    }
                     let idx = tool_calls.len();
                     if name == "Bash" {
                         let cmd = input.and_then(|i| i.get("command")).and_then(|c| c.as_str()).unwrap_or("");

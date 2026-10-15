@@ -32,6 +32,8 @@ pub fn run() {
             let price_path = data_dir.join("prices.json");
             let settings_path = data_dir.join("settings.json");
             let settings = settings::AppSettings::load_or_default(&settings_path);
+            let triggers_path = data_dir.join("triggers.json");
+            let (triggers, triggers_error) = triggers::TriggerConfig::load_or_default(&triggers_path);
             app.manage(AppState {
                 store: Mutex::new(store),
                 price: Mutex::new(PriceTable::load_or_seed(&price_path)),
@@ -41,6 +43,10 @@ pub fn run() {
                 settings_path,
                 label_progress: Mutex::new(labeller::LabelProgress::default()),
                 label_stop: Default::default(),
+                triggers: Mutex::new(triggers),
+                triggers_path,
+                triggers_error,
+                home: Some(home),
             });
             Ok(())
         })
@@ -59,6 +65,8 @@ pub fn run() {
             commands::run_model_labels,
             commands::get_label_progress,
             commands::stop_model_labels,
+            commands::get_triggers,
+            commands::set_adapter_enabled,
             commands::set_settings,
             commands::get_price_table,
             commands::set_price_table,
