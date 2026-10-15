@@ -7,7 +7,7 @@
 //! returned label is stored. Any failure keeps the rule label alone; three
 //! failures in a row stop the pass for that run.
 
-use crate::activity::{segment_key, Segment};
+use crate::activity::{segment_key, ToolMix};
 use crate::metrics::Filters;
 use crate::ollama::{check_url, system_prompt, Endpoint, PROMPT_VERSION};
 use crate::pricing::PriceTable;
@@ -162,19 +162,20 @@ pub fn build_jobs(raw: Vec<RawJob>, num_ctx: i64) -> Vec<LabelJob> {
         .collect()
 }
 
-fn trigger_words(seg: &Segment) -> &'static str {
-    match seg.kind.as_str() {
+fn trigger_words(kind: &str) -> &'static str {
+    match kind {
         "human" => "human",
-        "compact" | "resume" => "compaction",
+        "compact" => "compaction",
+        // The summary that opens a resumed session: the work after it is the task.
+        "resume" => "resumed from a summary",
         _ => "other",
     }
 }
 
-fn counts_line(seg: &Segment) -> String {
-    let t = &seg.tools;
+fn counts_line(kind: &str, t: &ToolMix) -> String {
     format!(
-        "Trigger: {}\nTools: edits {}, notes {}, test runs {} (longest failing streak {}), reads {}, web {}, shell {}, PR or git-range {}",
-        trigger_words(seg), t.edits, t.notes, t.tests, t.max_fail_streak, t.reads, t.web, t.shell, t.pr
+        "Trigger: {}\nTools: edits {}, notes {}, test runs {} (longest failing streak {}), reads {}, web {}, shell {}, PR or git-range {}, planning or sub-agent {}, other {}",
+        trigger_words(kind), t.edits, t.notes, t.tests, t.max_fail_streak, t.reads, t.web, t.shell, t.pr, t.meta, t.other
     )
 }
 
@@ -192,7 +193,7 @@ impl Store {
             }
             let key = segment_key(&seg.session, seg.start.as_ref().map(|(ts, _)| ts.as_str()));
             if !done.contains_key(&key) {
-                jobs.push(RawJob { key, counts: counts_line(seg), start: seg.start.clone() });
+                jobs.push(RawJob { key, counts: counts_line(&seg.kind, &seg.tools), start: seg.start.clone() });
             }
         }
         Ok(jobs)
@@ -370,15 +371,26 @@ mod tests {
     }
 
     #[test]
+    fn the_counts_line_names_the_trigger_and_every_kind_of_tool() {
+        let t = ToolMix { meta: 2, other: 3, edits: 1, ..Default::default() };
+        let line = counts_line("human", &t);
+        assert!(line.starts_with("Trigger: human\n"), "{line}");
+        assert!(line.contains("edits 1,") && line.contains("planning or sub-agent 2") && line.contains("other 3"), "{line}");
+        assert!(counts_line("compact", &t).starts_with("Trigger: compaction\n"));
+        // The summary that opens a resumed session starts work, not a compaction.
+        assert!(!counts_line("resume", &t).contains("compaction"), "{}", counts_line("resume", &t));
+    }
+
+    #[test]
     fn labels_from_an_older_prompt_are_redone() {
-        assert_ne!(PROMPT_VERSION, "label-prompt-v2", "the prompt with definitions is a new version");
+        assert_ne!(PROMPT_VERSION, "label-prompt-v3", "planning counts and the compaction-only overhead are a new version");
         let (store, dir) = fixture();
         // Every segment already has a label from the previous prompt.
         let raw = store.raw_label_jobs(&PriceTable::seed(), &Filters::default(), "qwen3:8b").unwrap();
         assert_eq!(raw.len(), 5);
         for j in &raw {
             store.conn.execute(
-                "INSERT INTO segment_model_labels(segment_key, model, prompt_version, label) VALUES (?1, 'qwen3:8b', 'label-prompt-v2', 'coding')",
+                "INSERT INTO segment_model_labels(segment_key, model, prompt_version, label) VALUES (?1, 'qwen3:8b', 'label-prompt-v3', 'coding')",
                 [&j.key],
             ).unwrap();
         }

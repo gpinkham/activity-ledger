@@ -155,6 +155,8 @@ pub(crate) struct ToolMix {
     /// Notes or docs files written (not source edits), and pull-request commands.
     pub(crate) notes: i64,
     pub(crate) pr: i64,
+    /// Work tool calls none of the counts above see (a question, a monitor, an MCP tool).
+    pub(crate) other: i64,
     /// Consecutive failing test runs so far, and the longest such run.
     pub(crate) fail_streak: i64,
     pub(crate) max_fail_streak: i64,
@@ -174,25 +176,34 @@ impl ToolMix {
                 _ => self.fail_streak = 0,
             }
         }
+        let mut counted = true;
         match tag {
             Some("test") => self.tests += 1,
             Some("write") => self.edits += 1,
             Some("notes") => self.notes += 1,
             Some("review") => self.pr += 1,
             Some("read") => self.reads += 1,
-            _ => {}
+            _ => counted = false,
         }
         if META_TOOLS.contains(&name) {
             self.meta += 1;
+            return;
         } else if EDIT_TOOLS.contains(&name) && !matches!(tag, Some("notes") | Some("scratch")) {
             self.edits += 1;
+            counted = true;
         } else if READ_TOOLS.contains(&name) {
             self.reads += 1;
+            counted = true;
         } else if WEB_TOOLS.contains(&name) {
             self.web += 1;
+            counted = true;
         }
         if name == "Bash" && tag != Some("read") {
             self.shell += 1;
+            counted = true;
+        }
+        if !counted {
+            self.other += 1;
         }
     }
 
@@ -991,6 +1002,18 @@ mod tests {
         assert_eq!(classify("human", &bash), "shell / ops");
         let shell_edit = mix(&|t| { t.add2("Bash", Some("write")); t.add2("Bash", None); });
         assert_eq!(classify("human", &shell_edit), "coding", "a file written from the shell is an edit");
+    }
+
+    #[test]
+    fn planning_tools_and_uncounted_tools_are_counted_too() {
+        let mut t = ToolMix::default();
+        for (name, tag) in [("TodoWrite", None), ("Agent", None), ("AskUserQuestion", None), ("Monitor", None),
+                            ("Edit", Some("scratch")), ("Bash", None), ("Edit", None), ("Read", None), ("Bash", Some("test"))] {
+            t.add(name, tag, None);
+        }
+        assert_eq!(t.meta, 2, "to-do list and sub-agent");
+        assert_eq!(t.other, 3, "work tools no other count sees: a question, a monitor, a scratch edit");
+        assert_eq!((t.edits, t.reads, t.shell, t.tests), (1, 1, 2, 1));
     }
 
     /// Store a model label for each segment whose rule label `pick` maps to one.

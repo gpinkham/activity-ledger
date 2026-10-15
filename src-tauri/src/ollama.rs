@@ -28,12 +28,12 @@ pub const LABEL_DEFINITIONS: [(&str, &str); 10] = [
     ("research", "it looked things up on the web or in documentation"),
     ("review / explore", "it mostly read files to understand code"),
     ("shell / ops", "it mostly ran shell commands: builds, installs, deploys, git"),
-    ("chat / planning", "it used no tools, or only planning tools such as a to-do list or launching a sub-agent"),
+    ("chat / planning", "it used no tools, or only planning or sub-agent tools such as a to-do list or launching a sub-agent"),
     ("other work", "work that fits none of the above"),
-    ("overhead", "a context compaction or other bookkeeping, not the task itself"),
+    ("overhead", "a context compaction (Trigger: compaction) and nothing else, whatever its tools"),
 ];
 /// Stored model labels are keyed by this; a new prompt means they are redone.
-pub const PROMPT_VERSION: &str = "label-prompt-v3";
+pub const PROMPT_VERSION: &str = "label-prompt-v4";
 /// The largest response accepted. A label answer is a few hundred bytes; a bigger
 /// (or claimed bigger) body is refused before it is read into memory.
 pub const MAX_RESPONSE_BYTES: usize = 1 << 20;
@@ -395,6 +395,10 @@ mod tests {
             assert!(prompt.contains(&format!("- {label}: {definition}")), "{label} is defined in the prompt");
         }
         assert!(prompt.contains("Judge mostly by the tool counts"), "the model is told what to judge by");
+        let def = |l: &str| LABEL_DEFINITIONS.iter().find(|(x, _)| *x == l).unwrap().1;
+        assert!(def("overhead").contains("Trigger: compaction") && !def("overhead").contains("bookkeeping"),
+            "overhead is a compaction only, as in the rules: {}", def("overhead"));
+        assert!(def("chat / planning").contains("planning or sub-agent"), "named as the counts line names it");
         let (url, rx) = fake_seq(vec![(Duration::ZERO, reply("coding"))]);
         chat_label(&check_url(&url, false).unwrap(), "m", "s", 4096, T).unwrap();
         let req = rx.recv().unwrap();
