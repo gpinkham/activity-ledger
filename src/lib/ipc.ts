@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   Filters, Totals, ByModel, ByTool, ByDay, ByProject, Workflow, PriceTable, RefreshSummary,
-  SessionSummary, SessionDetail, ActivityReport, AppSettings, LabelProgress,
+  SessionSummary, SessionDetail, ActivityReport, AppSettings, LabelProgress, TriggerStatus,
 } from "./types";
 import type { LabelSource } from "./labelSource";
 
@@ -27,3 +27,5 @@ export const setSettings = (settings: AppSettings) => invoke<void>("set_settings
 export const runModelLabels = (filters: Filters) => invoke<void>("run_model_labels", { filters });
 export const getLabelProgress = () => invoke<LabelProgress>("get_label_progress");
 export const stopModelLabels = () => invoke<void>("stop_model_labels");
+export const getTriggers = () => invoke<TriggerStatus>("get_triggers");
+export const setAdapterEnabled = (name: string, enabled: boolean) => invoke<TriggerStatus>("set_adapter_enabled", { name, enabled });

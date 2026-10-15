@@ -58,8 +58,13 @@ export interface ActivityRow {
   rule_labels?: { label: string; segments: number }[];
 }
 export interface DayActivity { day: string; activity: string; cost_usd: number }
+/** What started segments (a typed prompt, a compaction, a harness trigger) and how much of their cost was work. */
+export interface TriggerRow { trigger: string; segments: number; cost_usd: number; work_usd: number }
+export interface AdapterStatus { name: string; enabled: boolean; root: string | null; found: boolean }
+/** The harness trigger file as the card shows it. */
+export interface TriggerStatus { path: string; error: string | null; adapters: AdapterStatus[] }
 export interface ActivityReport {
-  rows: ActivityRow[]; by_day: DayActivity[];
+  rows: ActivityRow[]; by_day: DayActivity[]; by_trigger: TriggerRow[];
   totals: { cost_usd: number; overhead_usd: number; local_candidate_usd: number; calls: number; segments: number };
   reconcile: { sessions: number; ours_usd: number; claude_code_usd: number };
   unknown_models: string[];

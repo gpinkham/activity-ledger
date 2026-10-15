@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { save } from "@tauri-apps/plugin-dialog";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell, Legend } from "recharts";
-import { getActivity, getLabelProgress, getPriceTable, getSettings, runModelLabels, saveExport, setPriceTable, setSettings, stopModelLabels } from "../lib/ipc";
+import { getActivity, getLabelProgress, getPriceTable, getSettings, getTriggers, refresh, runModelLabels, saveExport, setAdapterEnabled, setPriceTable, setSettings, stopModelLabels } from "../lib/ipc";
+import { foundHint, showTriggers, workShare } from "../lib/harness";
 import { useFilters } from "../state/filters";
 import { ChartCard } from "../components/ChartCard";
 import { KpiRow } from "../components/KpiRow";
@@ -118,7 +119,7 @@ export default function Activity() {
           { label: "Overhead", value: pct(ofCost(t.overhead_usd)), hint: ofLabelled(usd(t.overhead_usd)),
             tooltip: llm
               ? "Segments the local model labelled overhead, as a share of the cost it labelled. Unlabelled segments are left out of both."
-              : "Context compactions: cost that goes to keeping the session going, not to the task." },
+              : "Context compactions, and an agent harness's upkeep (inbox handling, memory upkeep, standups) when its adapter is on: cost that keeps the work going but is not the work." },
           { label: "Local-model candidates", value: pct(ofCost(t.local_candidate_usd)), hint: ofLabelled(usd(t.local_candidate_usd)),
             tooltip: "Cost in activity types whose p95 context and output fit the local model limits set below. A hint, not a verdict." },
           { label: "API calls", value: compact(t.calls) },
@@ -136,7 +137,22 @@ export default function Activity() {
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <ChartCard title="Cost by activity" subtitle={`${COST_LABEL}, by ${labelsWord}`}>
+        <ChartCard title="Work vs overhead" subtitle={`${COST_LABEL}, per day, by ${labelsWord}`}>
+          <ResponsiveContainer width="100%" height={260}>
+            <BarChart data={byDay}>
+              <CartesianGrid strokeDasharray="3 3" stroke={tk.grid} />
+              <XAxis dataKey="day" tick={tk.tickSmall} {...tk.axisLine} />
+              <YAxis tick={tk.tick} {...tk.axisLine} tickFormatter={(v) => usd(Number(v))} width={60} />
+              <Tooltip formatter={(v) => usd(Number(v))} {...tk.tooltip} />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              <Bar dataKey="work" name="work" stackId="d" fill={workColor} />
+              <Bar dataKey="overhead" name="overhead" stackId="d" fill={overheadColor} radius={llm ? undefined : [4, 4, 0, 0]} />
+              {llm && <Bar dataKey="unlabelled" name="not labelled" stackId="d" fill={unlabelledColor} radius={[4, 4, 0, 0]} />}
+            </BarChart>
+          </ResponsiveContainer>
+        </ChartCard>
+
+        <ChartCard title="Kind of work" subtitle={`${COST_LABEL}, by ${labelsWord}`}>
           <ResponsiveContainer width="100%" height={Math.max(220, r.rows.length * 26)}>
             <BarChart data={r.rows} layout="vertical" margin={{ left: 30 }}>
               <CartesianGrid strokeDasharray="3 3" stroke={tk.grid} />
@@ -154,22 +170,29 @@ export default function Activity() {
             {llm && <span><span className="inline-block w-2 h-2 rounded-sm mr-1" style={{ background: unlabelledColor }} />not labelled by the model</span>}
           </div>
         </ChartCard>
-
-        <ChartCard title="Over time" subtitle={`${COST_LABEL}, per day, by ${labelsWord}`}>
-          <ResponsiveContainer width="100%" height={260}>
-            <BarChart data={byDay}>
-              <CartesianGrid strokeDasharray="3 3" stroke={tk.grid} />
-              <XAxis dataKey="day" tick={tk.tickSmall} {...tk.axisLine} />
-              <YAxis tick={tk.tick} {...tk.axisLine} tickFormatter={(v) => usd(Number(v))} width={60} />
-              <Tooltip formatter={(v) => usd(Number(v))} {...tk.tooltip} />
-              <Legend wrapperStyle={{ fontSize: 11 }} />
-              <Bar dataKey="work" name="work" stackId="d" fill={workColor} />
-              <Bar dataKey="overhead" name="overhead" stackId="d" fill={overheadColor} radius={llm ? undefined : [4, 4, 0, 0]} />
-              {llm && <Bar dataKey="unlabelled" name="not labelled" stackId="d" fill={unlabelledColor} radius={[4, 4, 0, 0]} />}
-            </BarChart>
-          </ResponsiveContainer>
-        </ChartCard>
       </div>
+
+      {showTriggers(r.by_trigger) && (
+        <ChartCard title="By trigger" subtitle="What started the work, and how much of its cost was the work itself (tool labels)">
+          <table className="text-sm w-full">
+            <thead>
+              <tr className="text-left text-muted">
+                <th className="py-1">Trigger</th><th className="text-right">Segments</th><th className="text-right">Cost</th><th className="text-right">Work share</th>
+              </tr>
+            </thead>
+            <tbody>
+              {r.by_trigger.map((x) => (
+                <tr key={x.trigger} className="border-t border-line/60 tabular-nums">
+                  <td className="py-1 text-ink">{x.trigger}</td>
+                  <td className="text-right">{compact(x.segments)}</td>
+                  <td className="text-right text-ink">{usd(x.cost_usd)}</td>
+                  <td className="text-right">{pct(workShare(x))}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </ChartCard>
+      )}
 
       <ChartCard title="By activity" subtitle="Context = input + cache write + cache read per call">
         <div className="flex items-center gap-2 mb-2">
@@ -214,6 +237,7 @@ export default function Activity() {
       </ChartCard>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <HarnessCard />
         <SettingsCard />
         <PricingCard />
       </div>
@@ -222,6 +246,44 @@ export default function Activity() {
 }
 
 const field = "border border-line rounded-md px-2 py-1 bg-surface text-ink w-full";
+
+/** The harness trigger file: where it is, which adapters are on, and a hint when
+ *  a harness folder is on this machine. Turning one on re-reads the transcripts. */
+function HarnessCard() {
+  const qc = useQueryClient();
+  const status = useQuery({ queryKey: ["triggers"], queryFn: getTriggers });
+  const toggle = useMutation({
+    mutationFn: async ({ name, enabled }: { name: string; enabled: boolean }) => {
+      const s = await setAdapterEnabled(name, enabled);
+      await refresh();
+      return s;
+    },
+    onSuccess: () => qc.invalidateQueries(),
+  });
+  const s = status.data;
+  if (!s) return null;
+  const hint = foundHint(s);
+  return (
+    <ChartCard title="Agent harness" subtitle="A segment a harness starts is overhead until it does the work">
+      <div className="flex flex-col gap-2 text-sm">
+        {hint && <p className="text-ink">{hint}</p>}
+        {s.adapters.map((a) => (
+          <div key={a.name} className="flex items-center gap-3">
+            <span className="text-ink">{a.name}</span>
+            <span className="text-xs text-muted">{a.enabled ? "on" : "off"}{a.root ? `, ${a.root}` : ""}</span>
+            <button disabled={toggle.isPending} onClick={() => toggle.mutate({ name: a.name, enabled: !a.enabled })}
+              className="ml-auto px-3 py-1 rounded-md border border-line text-ink hover:bg-elevated disabled:opacity-40">
+              {toggle.isPending ? "Reading…" : a.enabled ? "Turn off" : "Turn on"}
+            </button>
+          </div>
+        ))}
+        {toggle.error && <p className="text-xs text-red-500">{String(toggle.error)}</p>}
+        {s.error && <p className="text-xs text-red-500">{s.error}</p>}
+        <p className="text-xs text-muted">Trigger file: {s.path}. It holds phrases and paths only; add a harness by copying an adapter block.</p>
+      </div>
+    </ChartCard>
+  );
+}
 
 /** A token limit as the backend's whole number: an emptied or invalid field keeps
  *  the saved value, a decimal is rounded. */
