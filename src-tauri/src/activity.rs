@@ -1054,8 +1054,9 @@ mod tests {
         let wake = |ids: &str| format!("You have new hive inbox message(s) \u{2014} at least: {ids}. Read your inbox, act on what is pending there.");
         lines(&[
             prompt("s-h", "2026-10-03T10:00:00.000Z", &wake("m1")),
-            call("s-h", "2026-10-03T10:00:01.000Z", "h1", 1000, &[("h1a", "Bash", json!({"command":"mv inbox/m1.json inbox/.done/"})),
-                ("h1b", "Write", json!({"file_path":"/h/agents/a/outbox/r.json"})), ("h1c", "TodoWrite", json!({}))]),
+            { let mut c = call("s-h", "2026-10-03T10:00:01.000Z", "h1", 1000, &[("h1a", "Bash", json!({"command":"mv inbox/m1.json inbox/.done/"})),
+                ("h1b", "Write", json!({"file_path":"/h/agents/a/outbox/r.json"})), ("h1c", "TodoWrite", json!({}))]);
+              c["cwd"] = json!("/h/agents/a"); c },
             prompt("s-h", "2026-10-03T11:00:00.000Z", &wake("m2")),
             call("s-h", "2026-10-03T11:00:01.000Z", "h2", 2000, &[("h2a", "Read", json!({"file_path":"/h/agents/a/inbox/m2.json"})),
                 ("h2b", "Edit", json!({"file_path":"/r/src/lib.rs"}))]),
@@ -1070,9 +1071,11 @@ mod tests {
         ])
     }
     fn harness_store(config: &crate::triggers::TriggerConfig) -> Store {
+        let mut config = config.clone();
+        config.adapters[0].root = Some("/h".into());
         let mut store = Store::open_in_memory();
         let sf = ScannedFile { path: "/x/h/s-h.jsonl".into(), project: "h".into(), size: 1, mtime: 1, subagent: None };
-        store.replace_file(&sf, &crate::parser::parse_with("h", &harness_lines(), &config.matcher())).unwrap();
+        store.replace_file(&sf, &crate::parser::parse_with("h", &harness_lines(), &config.matcher(None))).unwrap();
         store.sender_labels = [("s1", "standup"), ("j1", "scheduled job")].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
         store.rebuild_sessions().unwrap();
         store

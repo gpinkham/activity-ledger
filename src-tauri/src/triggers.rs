@@ -80,6 +80,19 @@ impl TriggerConfig {
         }
     }
 
+    /// Turn one adapter on or off in the file at `path`. A file that cannot be
+    /// read is left as it is: it is the user's to fix.
+    pub fn set_enabled(path: &Path, name: &str, enabled: bool) -> Result<TriggerConfig, String> {
+        let (mut config, error) = TriggerConfig::load_or_default(path);
+        if let Some(e) = error {
+            return Err(format!("{e}. Fix or delete the file, then try again."));
+        }
+        let a = config.adapters.iter_mut().find(|a| a.name == name).ok_or_else(|| format!("no adapter named {name}"))?;
+        a.enabled = enabled;
+        config.save(path).map_err(|e| e.to_string())?;
+        Ok(config)
+    }
+
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         std::fs::write(path, serde_json::to_string_pretty(self).map_err(std::io::Error::other)?)
     }
@@ -88,11 +101,20 @@ impl TriggerConfig {
         self.adapters.iter().filter(|a| a.enabled)
     }
 
-    /// What the parser needs: the on adapters' opening lines and bookkeeping paths.
-    pub fn matcher(&self) -> Matcher {
+    /// What the parser needs: the on adapters' opening lines, and their
+    /// bookkeeping paths with the root they must be under.
+    pub fn matcher(&self, home: Option<&Path>) -> Matcher {
         Matcher {
             prompts: self.enabled().flat_map(|a| a.prompt_triggers.iter().cloned()).collect(),
-            paths: self.enabled().flat_map(|a| a.bookkeeping_paths.iter().cloned()).collect(),
+            paths: self
+                .enabled()
+                .filter(|a| !a.bookkeeping_paths.is_empty())
+                .map(|a| Anchored {
+                    root: a.root.as_deref().map(|r| expand(r, home).to_string_lossy().trim_end_matches('/').to_string()),
+                    root_as_written: a.root.as_deref().map(|r| r.trim_end_matches('/').to_string()),
+                    patterns: a.bookkeeping_paths.clone(),
+                })
+                .collect(),
         }
     }
 
@@ -151,7 +173,32 @@ fn read_log(text: &str, senders: &[LogSender], out: &mut HashMap<String, String>
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Matcher {
     prompts: Vec<PromptTrigger>,
-    paths: Vec<String>,
+    paths: Vec<Anchored>,
+}
+
+/// One adapter's bookkeeping files and the folder they must be in.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct Anchored {
+    /// Expanded; None: anywhere.
+    root: Option<String>,
+    /// As in the file (`~/...`), for commands that name it that way.
+    root_as_written: Option<String>,
+    patterns: Vec<String>,
+}
+
+impl Anchored {
+    /// Is `token` (a path as written, absolute, `~/` or relative to `cwd`) under the root?
+    fn holds(&self, token: &str, cwd: &str) -> bool {
+        let Some(root) = &self.root else { return true };
+        let under = |p: &str, r: &str| p == r || p.starts_with(&format!("{r}/"));
+        if token.starts_with('/') {
+            under(token, root)
+        } else if token.starts_with('~') {
+            self.root_as_written.as_deref().is_some_and(|r| under(token, r))
+        } else {
+            under(cwd, root)
+        }
+    }
 }
 
 impl Matcher {
@@ -184,9 +231,10 @@ impl Matcher {
         Some((p.label.clone(), ids))
     }
 
-    /// Does a path or shell command touch the harness's bookkeeping files?
-    pub fn is_bookkeeping(&self, s: &str) -> bool {
-        self.paths.iter().any(|p| path_match(s, p))
+    /// Does a path or shell command, run in `cwd`, touch a harness's bookkeeping
+    /// files? Only files under that harness's root count.
+    pub fn is_bookkeeping(&self, s: &str, cwd: &str) -> bool {
+        self.paths.iter().any(|a| a.patterns.iter().any(|p| path_tokens(s, p).any(|t| a.holds(t, cwd))))
     }
 
     /// Changes whenever the parse result would: the cache is re-read then.
@@ -198,15 +246,25 @@ impl Matcher {
     }
 }
 
-/// `p` in `s` at a path boundary: "memory.md" matches "/a/memory.md" and
-/// "cat memory.md", not "notmemory.md"; "/inbox/" also matches "inbox/a.json".
-fn path_match(s: &str, p: &str) -> bool {
-    let core = p.trim_start_matches('/');
-    if core.is_empty() {
-        return false;
-    }
-    s.match_indices(core).any(|(i, _)| {
-        s[..i].chars().last().map_or(true, |c| c == '/' || c.is_whitespace() || "\"'=(`".contains(c))
+/// Characters that end a word in a shell command or a path list.
+fn word_edge(c: char) -> bool {
+    c.is_whitespace() || "\"'=(`;&|<>),".contains(c)
+}
+
+/// Each place `p` occurs in `s` at path boundaries, as the whole path written
+/// there: "memory.md" matches "/a/memory.md" and "cat memory.md", not
+/// "notmemory.md" or "memory.md.bak"; "/inbox/" also matches "inbox/a.json".
+fn path_tokens<'a>(s: &'a str, p: &str) -> impl Iterator<Item = &'a str> + 'a {
+    let core = p.trim_start_matches('/').to_string();
+    let hits: Vec<(usize, usize)> = if core.is_empty() { Vec::new() } else { s.match_indices(core.as_str()).map(|(i, m)| (i, i + m.len())).collect() };
+    hits.into_iter().filter_map(move |(i, end)| {
+        let before_ok = s[..i].chars().last().map_or(true, |c| c == '/' || word_edge(c));
+        let after_ok = core.ends_with('/') || s[end..].chars().next().map_or(true, |c| c == '/' || word_edge(c));
+        if !(before_ok && after_ok) {
+            return None;
+        }
+        let start = s[..i].rfind(word_edge).map_or(0, |k| k + s[k..].chars().next().map_or(1, char::len_utf8));
+        Some(&s[start..end])
     })
 }
 
@@ -226,16 +284,16 @@ mod tests {
         assert_eq!(c.adapters.len(), 1);
         assert_eq!(c.adapters[0].name, "Munder Difflin");
         assert!(!c.adapters[0].enabled, "off until the user turns it on");
-        assert_eq!(c.matcher(), Matcher::default(), "an adapter that is off matches nothing");
-        assert_eq!(c.matcher().fingerprint(), "");
+        assert_eq!(c.matcher(None), Matcher::default(), "an adapter that is off matches nothing");
+        assert_eq!(c.matcher(None).fingerprint(), "");
     }
 
     #[test]
     fn an_opening_line_gives_the_label_and_the_ids_it_names() {
-        let m = md_on().matcher();
+        let m = md_on().matcher(None);
         // As Munder Difflin's inboxNudgeText writes it.
-        let wake = "You have new hive inbox message(s) \u{2014} at least: 2026-10-15T00-08-31-824Z-3b07c8, m-2. Read your inbox, act on what is pending there.";
-        assert_eq!(m.prompt(wake), Some(("inbox handling".into(), vec!["2026-10-15T00-08-31-824Z-3b07c8".into(), "m-2".into()])));
+        let wake = "You have new hive inbox message(s) \u{2014} at least: 2026-01-02T03-04-05-678Z-abc123, m-2. Read your inbox, act on what is pending there.";
+        assert_eq!(m.prompt(wake), Some(("inbox handling".into(), vec!["2026-01-02T03-04-05-678Z-abc123".into(), "m-2".into()])));
         assert_eq!(m.prompt("You have new hive inbox message(s). Read your inbox."), Some(("inbox handling".into(), vec![])));
         assert_eq!(m.prompt("You are compacting one AI agent's long-term memory file. You will receive:").map(|x| x.0), Some("memory upkeep".into()));
         assert_eq!(m.prompt("Please fix the inbox page"), None);
@@ -243,16 +301,34 @@ mod tests {
     }
 
     #[test]
-    fn bookkeeping_paths_match_at_a_path_boundary() {
-        let m = md_on().matcher();
-        for s in ["/h/hive/agents/a/inbox/m.json", "mv inbox/a.json inbox/.done/", "cat > outbox/reply.json <<EOF",
-                  "/h/hive/agents/a/memory.md", "echo x >> memory.md", "/h/hive/board.md", "/h/hive/tasks.json", "tail log.jsonl"] {
-            assert!(m.is_bookkeeping(s), "{s}");
+    fn bookkeeping_is_only_the_harness_files_under_its_root() {
+        let home = Path::new("/home/me");
+        let m = md_on().matcher(Some(home));
+        let hive = "/home/me/HarnessAgents/hive";
+        let agent = "/home/me/HarnessAgents/hive/agents/a";
+        // Under the root: absolute paths, and relative paths or commands run there.
+        for (s, cwd) in [
+            ("/home/me/HarnessAgents/hive/agents/a/inbox/m.json", ""), ("/home/me/HarnessAgents/hive/agents/a/memory.md", "/r"),
+            ("/home/me/HarnessAgents/hive/board.md", ""), ("/home/me/HarnessAgents/hive/tasks.json", ""),
+            ("mv inbox/a.json inbox/.done/", agent), ("cat > outbox/reply.json <<EOF", agent), ("echo x >> memory.md", agent),
+            ("tail log.jsonl", hive), ("inbox/m.json", agent),
+            ("tail ~/HarnessAgents/hive/log.jsonl", "/r"), ("cat /home/me/HarnessAgents/hive/board.md", "/r"),
+        ] {
+            assert!(m.is_bookkeeping(s, cwd), "{s} (cwd {cwd})");
         }
-        for s in ["src/inbox.rs", "/r/myinbox/a", "docs/notmemory.md", "/r/dashboard.md", "cargo test"] {
-            assert!(!m.is_bookkeeping(s), "{s}");
+        // Dwight's probes: the same names anywhere else are the work.
+        for (s, cwd) in [
+            ("/Users/me/app/src/inbox/List.tsx", ""), ("/r/.vscode/tasks.json", "/r"), ("/r/docs/memory.md", "/r"),
+            ("/r/logs/log.jsonl", "/r"), ("mv inbox/a.json inbox/.done/", "/r"), ("echo x >> memory.md", "/r"),
+            ("cargo test && echo done >> board.md", "/r"), ("/home/me/HarnessAgents/hive-old/board.md", ""),
+            // End boundary: a backup is not the file.
+            ("/home/me/HarnessAgents/hive/agents/a/memory.md.bak", ""), ("cp memory.md.bak x", agent),
+            // Start boundary, as before.
+            ("src/inbox.rs", agent), ("/home/me/HarnessAgents/hive/agents/a/notmemory.md", ""), ("/home/me/HarnessAgents/hive/dashboard.md", ""),
+        ] {
+            assert!(!m.is_bookkeeping(s, cwd), "{s} (cwd {cwd})");
         }
-        assert!(!TriggerConfig::default().matcher().is_bookkeeping("/h/hive/memory.md"), "off: nothing is bookkeeping");
+        assert!(!TriggerConfig::default().matcher(Some(home)).is_bookkeeping("/home/me/HarnessAgents/hive/memory.md", hive), "off: nothing is bookkeeping");
     }
 
     #[test]
@@ -287,6 +363,22 @@ mod tests {
         assert_eq!(c, TriggerConfig::default());
         assert!(err.unwrap().contains("using the built-in default"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json", "a broken file is the user's: not overwritten");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn turning_an_adapter_on_saves_it_but_never_over_a_broken_file() {
+        let dir = std::env::temp_dir().join(format!("al_toggle_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("triggers.json");
+        let on = TriggerConfig::set_enabled(&path, "Munder Difflin", true).unwrap();
+        assert!(on.adapters[0].enabled);
+        assert!(TriggerConfig::load_or_default(&path).0.adapters[0].enabled, "saved");
+        assert!(TriggerConfig::set_enabled(&path, "Nobody", true).unwrap_err().contains("no adapter named Nobody"));
+        std::fs::write(&path, "{ broken").unwrap();
+        let err = TriggerConfig::set_enabled(&path, "Munder Difflin", false).unwrap_err();
+        assert!(err.contains("Fix or delete the file"), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ broken", "the user's file is not replaced");
         std::fs::remove_dir_all(&dir).ok();
     }
 

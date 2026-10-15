@@ -26,7 +26,7 @@ pub fn run() {
             let data_dir = app.path().app_data_dir().expect("app data dir");
             std::fs::create_dir_all(&data_dir).ok();
             let db_path = data_dir.join("activity-ledger.sqlite");
-            let store = store::Store::open(&db_path).expect("open db");
+            let mut store = store::Store::open(&db_path).expect("open db");
             let home = dirs::home_dir().expect("home dir");
             let claude_root = home.join(".claude").join("projects");
             let price_path = data_dir.join("prices.json");
@@ -34,6 +34,8 @@ pub fn run() {
             let settings = settings::AppSettings::load_or_default(&settings_path);
             let triggers_path = data_dir.join("triggers.json");
             let (triggers, triggers_error) = triggers::TriggerConfig::load_or_default(&triggers_path);
+            // Standups and scheduled jobs are known from the first view, before any Refresh.
+            store.sender_labels = triggers.sender_labels(Some(&home));
             app.manage(AppState {
                 store: Mutex::new(store),
                 price: Mutex::new(PriceTable::load_or_seed(&price_path)),
@@ -45,7 +47,7 @@ pub fn run() {
                 label_stop: Default::default(),
                 triggers: Mutex::new(triggers),
                 triggers_path,
-                triggers_error,
+                triggers_error: Mutex::new(triggers_error),
                 home: Some(home),
             });
             Ok(())

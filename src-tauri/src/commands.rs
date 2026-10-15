@@ -28,7 +28,7 @@ pub struct AppState {
     /// The harness trigger file, its path, and why it could not be read, if so.
     pub triggers: Mutex<TriggerConfig>,
     pub triggers_path: PathBuf,
-    pub triggers_error: Option<String>,
+    pub triggers_error: Mutex<Option<String>>,
     pub home: Option<PathBuf>,
 }
 
@@ -49,11 +49,20 @@ pub struct AdapterStatus {
     pub found: bool,
 }
 
-fn trigger_status(state: &AppState, config: &TriggerConfig) -> TriggerStatus {
+/// Read the trigger file again (the user may have edited it), keeping the result
+/// and the reason it could not be read, if so.
+fn reload_triggers(state: &AppState) -> Result<(TriggerConfig, Option<String>), String> {
+    let (config, error) = TriggerConfig::load_or_default(&state.triggers_path);
+    *state.triggers.lock().map_err(|e| e.to_string())? = config.clone();
+    *state.triggers_error.lock().map_err(|e| e.to_string())? = error.clone();
+    Ok((config, error))
+}
+
+fn trigger_status(state: &AppState, config: &TriggerConfig, error: Option<String>) -> TriggerStatus {
     let found = config.found_off(state.home.as_deref());
     TriggerStatus {
         path: state.triggers_path.to_string_lossy().to_string(),
-        error: state.triggers_error.clone(),
+        error,
         adapters: config
             .adapters
             .iter()
@@ -69,19 +78,17 @@ fn trigger_status(state: &AppState, config: &TriggerConfig) -> TriggerStatus {
 
 #[tauri::command]
 pub fn get_triggers(state: tauri::State<AppState>) -> Result<TriggerStatus, String> {
-    let config = state.triggers.lock().map_err(|e| e.to_string())?;
-    Ok(trigger_status(&state, &config))
+    let (config, error) = reload_triggers(&state)?;
+    Ok(trigger_status(&state, &config, error))
 }
 
 /// Turn an adapter on or off and save the file. The next refresh re-reads the
 /// transcripts with it.
 #[tauri::command]
 pub fn set_adapter_enabled(state: tauri::State<AppState>, name: String, enabled: bool) -> Result<TriggerStatus, String> {
-    let mut config = state.triggers.lock().map_err(|e| e.to_string())?;
-    let a = config.adapters.iter_mut().find(|a| a.name == name).ok_or_else(|| format!("no adapter named {name}"))?;
-    a.enabled = enabled;
-    config.save(&state.triggers_path).map_err(|e| e.to_string())?;
-    Ok(trigger_status(&state, &config))
+    TriggerConfig::set_enabled(&state.triggers_path, &name, enabled)?;
+    let (config, error) = reload_triggers(&state)?;
+    Ok(trigger_status(&state, &config, error))
 }
 
 #[derive(Debug, Serialize)]
@@ -120,10 +127,10 @@ pub fn do_refresh_with(store: &mut Store, root: &Path, matcher: &Matcher) -> rus
 
 #[tauri::command]
 pub fn refresh(state: tauri::State<AppState>) -> Result<RefreshSummary, String> {
-    let config = state.triggers.lock().map_err(|e| e.to_string())?.clone();
+    let (config, _) = reload_triggers(&state)?;
     let mut store = state.store.lock().map_err(|e| e.to_string())?;
     store.sender_labels = config.sender_labels(state.home.as_deref());
-    do_refresh_with(&mut store, &state.claude_root, &config.matcher()).map_err(|e| e.to_string())
+    do_refresh_with(&mut store, &state.claude_root, &config.matcher(state.home.as_deref())).map_err(|e| e.to_string())
 }
 
 macro_rules! metric_cmd {

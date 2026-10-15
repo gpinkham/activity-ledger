@@ -219,7 +219,7 @@ pub fn parse_with(project: &str, content: &str, matcher: &Matcher) -> ParsedFile
                             .iter()
                             .find_map(|k| input.and_then(|i| i.get(*k)).and_then(|p| p.as_str()))
                             .unwrap_or("");
-                        if matcher.is_bookkeeping(target) {
+                        if matcher.is_bookkeeping(target, &cwd) {
                             tag = Some("bookkeeping".into());
                         }
                     }

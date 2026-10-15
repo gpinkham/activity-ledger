@@ -403,14 +403,15 @@ mod tests {
     fn a_segment_a_harness_started_is_sent_with_its_trigger() {
         let mut on = crate::triggers::TriggerConfig::default();
         on.adapters[0].enabled = true;
+        on.adapters[0].root = Some("/h".into());
         let content = [
             json!({"type":"user","sessionId":"s-h","timestamp":"2026-10-03T10:00:00.000Z","message":{"role":"user","content":"You have new hive inbox message(s). Read your inbox."}}),
-            json!({"type":"assistant","sessionId":"s-h","timestamp":"2026-10-03T10:00:01.000Z","message":{"id":"h1","role":"assistant","model":"claude-haiku-4-5-20251001","usage":{"input_tokens":10,"output_tokens":1},
+            json!({"type":"assistant","sessionId":"s-h","cwd":"/h/a","timestamp":"2026-10-03T10:00:01.000Z","message":{"id":"h1","role":"assistant","model":"claude-haiku-4-5-20251001","usage":{"input_tokens":10,"output_tokens":1},
                 "content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"mv inbox/a.json inbox/.done/"}}]}}),
         ].iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n");
         let mut store = Store::open_in_memory();
         let sf = ScannedFile { path: "/x/h.jsonl".into(), project: "h".into(), size: 1, mtime: 1, subagent: None };
-        store.replace_file(&sf, &crate::parser::parse_with("h", &content, &on.matcher())).unwrap();
+        store.replace_file(&sf, &crate::parser::parse_with("h", &content, &on.matcher(None))).unwrap();
         let raw = store.raw_label_jobs(&PriceTable::seed(), &Filters::default(), "m").unwrap();
         assert_eq!(raw.len(), 1);
         assert!(raw[0].counts.starts_with("Trigger: harness, inbox handling\n") && raw[0].counts.ends_with("harness files 1"), "{}", raw[0].counts);
