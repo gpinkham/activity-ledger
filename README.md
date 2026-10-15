@@ -1,12 +1,20 @@
 # Activity Ledger
 
-A desktop app that reads your Claude Code transcripts on your own machine and shows what the work would cost at API list prices, broken down by the kind of work: coding, debugging, code review, research, and so on.
+A desktop app that reads your Claude Code transcripts on your own machine and shows where an agent harness spends its tokens: **real work versus overhead**, at API list prices. Inside the work, it shows the kind: coding, debugging, code review, research, and so on.
 
 Activity Ledger is made by Pinkham Software. It is not made, endorsed or supported by Anthropic.
 
 **Everything stays on your machine.** The app reads `~/.claude/projects` and keeps its own cache in the app's data folder on this computer. It makes no network calls, except one optional call to a local model that you run yourself (see [Privacy](#privacy)).
 
 Figures are estimates at Anthropic's published API list prices. They are not an invoice, and they are not your plan's usage.
+
+## Work vs overhead
+
+- Overhead is what keeps the work going but is not the work: context compactions and, with a harness adapter on, its inbox handling, memory upkeep, standups and scheduled jobs.
+- A segment a harness starts that goes on to do the work counts as that work, labelled by what it did.
+- A harness is one adapter block in `triggers.json`; Munder Difflin is the first, off until you turn it on.
+
+<!-- SCREENSHOT: docs/screenshots/work-vs-overhead.png (Cost by activity with a harness adapter on) goes here. -->
 
 ![Overview: totals and estimated cost over time](docs/screenshots/overview.png)
 
@@ -33,6 +41,9 @@ Figures are estimates at Anthropic's published API list prices. They are not an 
 | chat / planning | it used no tools, or only planning tools such as a to-do list or launching a sub-agent |
 | other work | none of the above |
 | compaction | a context compaction |
+| a harness trigger (inbox handling, memory upkeep, standup, scheduled job) | a harness adapter is on, its trigger started the segment, and the segment did only planning or calls on the harness's own files |
+
+**Agent harnesses.** `triggers.json` in the app's data folder lists adapters, one per harness. An adapter names the opening lines that start the harness's upkeep, the senders in its log that mark a standup or a scheduled job, and its bookkeeping files (inbox, memory, board). Calls on those files are bookkeeping, not work. Turn an adapter on or off on the **Agent harness** card; the app then reads the transcripts again. The **By trigger** table shows what started the work and how much of its cost was the work itself.
 
 **An optional local model second.** If you run [Ollama](https://ollama.com), the app can ask your model for a second label for each segment, from a fixed list. The model is given a one-line definition of each label and told to judge mostly by the tool counts. You start this yourself with **Label now**. It is off until you do.
 
@@ -47,6 +58,7 @@ The app asks the model for a JSON answer limited to the label list (Ollama's str
 - The app reads Claude Code's transcripts in `~/.claude/projects` on this machine. It never changes them.
 - Its cache (a SQLite file in the app's data folder) keeps counts, token totals, costs, timestamps, tool names, labels, model names, the Claude Code version, git branch names, message and tool call ids, the session titles Claude Code wrote, and the project folder and transcript file each record came from. It does not keep your prompts, Claude's replies, tool inputs or commands. Tool inputs are read in memory only to decide a tag such as "test run".
 - The only network call is the optional labelling pass, to your Ollama. By default it must be on this machine (a loopback address). A remote host is used only if you tick "Allow a remote Ollama". For each segment it sends tool counts and a short excerpt of the opening prompt. Only the label that comes back is kept.
+- The trigger file holds phrases and paths only. With an adapter on, the app reads that harness's log on this machine to pick a label (a standup, a scheduled job) and keeps only the label.
 - No telemetry, no accounts, no calls to Anthropic or anyone else.
 
 ![Local model settings](docs/screenshots/privacy-settings.png)
