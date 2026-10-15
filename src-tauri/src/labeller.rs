@@ -179,6 +179,15 @@ fn counts_line(kind: &str, t: &ToolMix) -> String {
     )
 }
 
+/// counts_line for a segment a harness started (triggers.rs): the trigger's label
+/// and the calls on the harness's own files.
+fn counts_line_for(trigger: Option<&str>, kind: &str, t: &ToolMix) -> String {
+    let Some(label) = trigger else { return counts_line(kind, t) };
+    let line = counts_line(kind, t);
+    let tools = line.split_once('\n').map(|x| x.1).unwrap_or("");
+    format!("Trigger: harness, {label}\n{tools}, harness files {}", t.bookkeeping)
+}
+
 impl Store {
     /// The segments to label (those with API calls), unlabelled by this model and
     /// prompt version. Reads no transcript: run it under the store lock, release
@@ -193,7 +202,7 @@ impl Store {
             }
             let key = segment_key(&seg.session, seg.start.as_ref().map(|(ts, _)| ts.as_str()));
             if !done.contains_key(&key) {
-                jobs.push(RawJob { key, counts: counts_line(&seg.kind, &seg.tools), start: seg.start.clone() });
+                jobs.push(RawJob { key, counts: counts_line_for(seg.trigger.as_deref(), &seg.kind, &seg.tools), start: seg.start.clone() });
             }
         }
         Ok(jobs)
@@ -379,6 +388,32 @@ mod tests {
         assert!(counts_line("compact", &t).starts_with("Trigger: compaction\n"));
         // The summary that opens a resumed session starts work, not a compaction.
         assert!(!counts_line("resume", &t).contains("compaction"), "{}", counts_line("resume", &t));
+    }
+
+    #[test]
+    fn a_harness_trigger_and_its_file_calls_are_in_the_line() {
+        let t = ToolMix { bookkeeping: 2, edits: 1, ..Default::default() };
+        let line = counts_line_for(Some("inbox handling"), "human", &t);
+        assert!(line.starts_with("Trigger: harness, inbox handling\n"), "{line}");
+        assert!(line.contains("edits 1,") && line.ends_with(", harness files 2"), "{line}");
+        assert_eq!(counts_line_for(None, "human", &t), counts_line("human", &t), "no trigger: the line as before");
+    }
+
+    #[test]
+    fn a_segment_a_harness_started_is_sent_with_its_trigger() {
+        let mut on = crate::triggers::TriggerConfig::default();
+        on.adapters[0].enabled = true;
+        let content = [
+            json!({"type":"user","sessionId":"s-h","timestamp":"2026-10-03T10:00:00.000Z","message":{"role":"user","content":"You have new hive inbox message(s). Read your inbox."}}),
+            json!({"type":"assistant","sessionId":"s-h","timestamp":"2026-10-03T10:00:01.000Z","message":{"id":"h1","role":"assistant","model":"claude-haiku-4-5-20251001","usage":{"input_tokens":10,"output_tokens":1},
+                "content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"mv inbox/a.json inbox/.done/"}}]}}),
+        ].iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n");
+        let mut store = Store::open_in_memory();
+        let sf = ScannedFile { path: "/x/h.jsonl".into(), project: "h".into(), size: 1, mtime: 1, subagent: None };
+        store.replace_file(&sf, &crate::parser::parse_with("h", &content, &on.matcher())).unwrap();
+        let raw = store.raw_label_jobs(&PriceTable::seed(), &Filters::default(), "m").unwrap();
+        assert_eq!(raw.len(), 1);
+        assert!(raw[0].counts.starts_with("Trigger: harness, inbox handling\n") && raw[0].counts.ends_with("harness files 1"), "{}", raw[0].counts);
     }
 
     #[test]

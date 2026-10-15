@@ -30,10 +30,10 @@ pub const LABEL_DEFINITIONS: [(&str, &str); 10] = [
     ("shell / ops", "it mostly ran shell commands: builds, installs, deploys, git"),
     ("chat / planning", "it used no tools, or only planning or sub-agent tools such as a to-do list or launching a sub-agent"),
     ("other work", "work that fits none of the above"),
-    ("overhead", "a context compaction (Trigger: compaction) and nothing else, whatever its tools"),
+    ("overhead", "a context compaction (Trigger: compaction), whatever its tools; or an agent harness's upkeep (Trigger: harness, ...) that only touched the harness's own files or planned. A harness stretch that goes on to do the work is that work"),
 ];
 /// Stored model labels are keyed by this; a new prompt means they are redone.
-pub const PROMPT_VERSION: &str = "label-prompt-v4";
+pub const PROMPT_VERSION: &str = "label-prompt-v5";
 /// The largest response accepted. A label answer is a few hundred bytes; a bigger
 /// (or claimed bigger) body is refused before it is read into memory.
 pub const MAX_RESPONSE_BYTES: usize = 1 << 20;
@@ -399,6 +399,9 @@ mod tests {
         assert!(def("overhead").contains("Trigger: compaction") && !def("overhead").contains("bookkeeping"),
             "overhead is a compaction only, as in the rules: {}", def("overhead"));
         assert!(def("chat / planning").contains("planning or sub-agent"), "named as the counts line names it");
+        assert!(def("overhead").contains("Trigger: harness") && def("overhead").contains("goes on to do the work is that work"),
+            "harness upkeep is overhead until it does the work: {}", def("overhead"));
+        assert_ne!(PROMPT_VERSION, "label-prompt-v4", "harness upkeep is a new prompt");
         let (url, rx) = fake_seq(vec![(Duration::ZERO, reply("coding"))]);
         chat_label(&check_url(&url, false).unwrap(), "m", "s", 4096, T).unwrap();
         let req = rx.recv().unwrap();
