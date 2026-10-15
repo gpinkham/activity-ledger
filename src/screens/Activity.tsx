@@ -276,7 +276,7 @@ function HarnessCard() {
         ))}
         {toggle.error && <p className="text-xs text-red-500">{String(toggle.error)}</p>}
         {s.error && <p className="text-xs text-red-500">{s.error}</p>}
-        <p className="text-xs text-muted">Trigger file: {s.path}. It holds phrases and paths only; add a harness by copying an adapter block. Edited the file? Press Refresh to apply it.</p>
+        <p className="text-xs text-muted">Trigger file: {s.path}. It holds phrases and paths only; add a harness by copying an adapter block. Edited the file? Press Refresh to apply it. Any change to it means the local model labels are made again.</p>
       </div>
     </ChartCard>
   );
