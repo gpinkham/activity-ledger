@@ -83,14 +83,20 @@ impl TriggerConfig {
     /// Turn one adapter on or off in the file at `path`. A file that cannot be
     /// read is left as it is: it is the user's to fix.
     pub fn set_enabled(path: &Path, name: &str, enabled: bool) -> Result<TriggerConfig, String> {
-        let (mut config, error) = TriggerConfig::load_or_default(path);
+        let (_, error) = TriggerConfig::load_or_default(path);
         if let Some(e) = error {
             return Err(format!("{e}. Fix or delete the file, then try again."));
         }
-        let a = config.adapters.iter_mut().find(|a| a.name == name).ok_or_else(|| format!("no adapter named {name}"))?;
-        a.enabled = enabled;
-        config.save(path).map_err(|e| e.to_string())?;
-        Ok(config)
+        // Change only that one field, so keys this build does not know are kept.
+        let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let mut v: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        let a = v["adapters"]
+            .as_array_mut()
+            .and_then(|list| list.iter_mut().find(|a| a["name"] == name))
+            .ok_or_else(|| format!("no adapter named {name}"))?;
+        a["enabled"] = serde_json::Value::Bool(enabled);
+        std::fs::write(path, serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        Ok(TriggerConfig::load_or_default(path).0)
     }
 
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
@@ -106,6 +112,7 @@ impl TriggerConfig {
     pub fn matcher(&self, home: Option<&Path>) -> Matcher {
         Matcher {
             prompts: self.enabled().flat_map(|a| a.prompt_triggers.iter().cloned()).collect(),
+            home: home.map(|h| h.to_string_lossy().trim_end_matches('/').to_string()),
             paths: self
                 .enabled()
                 .filter(|a| !a.bookkeeping_paths.is_empty())
@@ -173,6 +180,8 @@ fn read_log(text: &str, senders: &[LogSender], out: &mut HashMap<String, String>
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Matcher {
     prompts: Vec<PromptTrigger>,
+    /// The home folder, for `~` and `$HOME` in commands.
+    home: Option<String>,
     paths: Vec<Anchored>,
 }
 
@@ -186,19 +195,68 @@ struct Anchored {
     patterns: Vec<String>,
 }
 
-impl Anchored {
-    /// Is `token` (a path as written, absolute, `~/` or relative to `cwd`) under the root?
-    fn holds(&self, token: &str, cwd: &str) -> bool {
-        let Some(root) = &self.root else { return true };
-        let under = |p: &str, r: &str| p == r || p.starts_with(&format!("{r}/"));
-        if token.starts_with('/') {
-            under(token, root)
-        } else if token.starts_with('~') {
-            self.root_as_written.as_deref().is_some_and(|r| under(token, r))
-        } else {
-            under(cwd, root)
+fn under(p: &str, r: &str) -> bool {
+    p == r || p.starts_with(&format!("{r}/"))
+}
+
+/// `a/./b/../c` as `a/c`, for an absolute path.
+fn normalize(p: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in p.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => { parts.pop(); }
+            x => parts.push(x),
         }
     }
+    format!("/{}", parts.join("/"))
+}
+
+impl Anchored {
+    /// Is `token` (a path as written: absolute, `~/`, `$HOME/` or relative to
+    /// `cwd`) under the root?
+    fn holds(&self, token: &str, cwd: &str, home: Option<&str>) -> bool {
+        let Some(root) = &self.root else { return true };
+        let token = token.trim_matches(|c| c == '"' || c == '\'');
+        let token = token.strip_prefix("${HOME}").or_else(|| token.strip_prefix("$HOME")).map(|r| format!("~{r}")).unwrap_or_else(|| token.to_string());
+        if let Some(rest) = token.strip_prefix('~') {
+            return match home {
+                Some(h) => under(&normalize(&format!("{h}{rest}")), root),
+                None => self.root_as_written.as_deref().is_some_and(|r| under(&token, r)),
+            };
+        }
+        if token.starts_with('/') {
+            return under(&normalize(&token), root);
+        }
+        !cwd.is_empty() && under(&normalize(&format!("{cwd}/{token}")), root)
+    }
+}
+
+/// The folder a shell command is in at byte `at`: the record's cwd, moved by each
+/// `cd <dir>` before that point.
+fn cwd_at(s: &str, at: usize, cwd: &str, home: Option<&str>) -> String {
+    let mut cur = cwd.to_string();
+    let head = &s[..at];
+    for (i, _) in head.match_indices("cd") {
+        let before_ok = head[..i].chars().last().map_or(true, |c| c.is_whitespace() || ";&|(".contains(c));
+        let rest = &head[i + 2..];
+        if !before_ok || !rest.starts_with(|c: char| c.is_whitespace()) {
+            continue;
+        }
+        let arg: String = rest.trim_start().chars().take_while(|c| !word_edge(*c)).collect();
+        let arg = arg.trim_matches(|c| c == '"' || c == '\'');
+        let arg = arg.strip_prefix("${HOME}").or_else(|| arg.strip_prefix("$HOME")).map(|r| format!("~{r}")).unwrap_or_else(|| arg.to_string());
+        cur = if arg.is_empty() || arg.starts_with('~') {
+            match home { Some(h) => normalize(&format!("{h}{}", arg.trim_start_matches('~'))), None => String::new() }
+        } else if arg.starts_with('/') {
+            normalize(&arg)
+        } else if cur.is_empty() {
+            String::new()
+        } else {
+            normalize(&format!("{cur}/{arg}"))
+        };
+    }
+    cur
 }
 
 impl Matcher {
@@ -234,7 +292,10 @@ impl Matcher {
     /// Does a path or shell command, run in `cwd`, touch a harness's bookkeeping
     /// files? Only files under that harness's root count.
     pub fn is_bookkeeping(&self, s: &str, cwd: &str) -> bool {
-        self.paths.iter().any(|a| a.patterns.iter().any(|p| path_tokens(s, p).any(|t| a.holds(t, cwd))))
+        let home = self.home.as_deref();
+        self.paths.iter().any(|a| {
+            a.patterns.iter().any(|p| path_tokens(s, p).any(|(at, t)| a.holds(t, &cwd_at(s, at, cwd, home), home)))
+        })
     }
 
     /// Changes whenever the parse result would: the cache is re-read then.
@@ -254,7 +315,7 @@ fn word_edge(c: char) -> bool {
 /// Each place `p` occurs in `s` at path boundaries, as the whole path written
 /// there: "memory.md" matches "/a/memory.md" and "cat memory.md", not
 /// "notmemory.md" or "memory.md.bak"; "/inbox/" also matches "inbox/a.json".
-fn path_tokens<'a>(s: &'a str, p: &str) -> impl Iterator<Item = &'a str> + 'a {
+fn path_tokens<'a>(s: &'a str, p: &str) -> impl Iterator<Item = (usize, &'a str)> + 'a {
     let core = p.trim_start_matches('/').to_string();
     let hits: Vec<(usize, usize)> = if core.is_empty() { Vec::new() } else { s.match_indices(core.as_str()).map(|(i, m)| (i, i + m.len())).collect() };
     hits.into_iter().filter_map(move |(i, end)| {
@@ -264,7 +325,7 @@ fn path_tokens<'a>(s: &'a str, p: &str) -> impl Iterator<Item = &'a str> + 'a {
             return None;
         }
         let start = s[..i].rfind(word_edge).map_or(0, |k| k + s[k..].chars().next().map_or(1, char::len_utf8));
-        Some(&s[start..end])
+        Some((start, &s[start..end]))
     })
 }
 
@@ -313,6 +374,11 @@ mod tests {
             ("mv inbox/a.json inbox/.done/", agent), ("cat > outbox/reply.json <<EOF", agent), ("echo x >> memory.md", agent),
             ("tail log.jsonl", hive), ("inbox/m.json", agent),
             ("tail ~/HarnessAgents/hive/log.jsonl", "/r"), ("cat /home/me/HarnessAgents/hive/board.md", "/r"),
+            // A cd earlier in the same command moves the folder the rest runs in.
+            ("cd ~/HarnessAgents/hive/agents/x && ls inbox; mv inbox/a.json inbox/.done/", "/r"),
+            ("cd /home/me/HarnessAgents/hive && cd agents/x && cat memory.md", "/r"),
+            ("cat $HOME/HarnessAgents/hive/board.md", "/r"), ("tail ${HOME}/HarnessAgents/hive/log.jsonl", "/r"),
+            ("cat ../board.md", agent),
         ] {
             assert!(m.is_bookkeeping(s, cwd), "{s} (cwd {cwd})");
         }
@@ -321,6 +387,9 @@ mod tests {
             ("/Users/me/app/src/inbox/List.tsx", ""), ("/r/.vscode/tasks.json", "/r"), ("/r/docs/memory.md", "/r"),
             ("/r/logs/log.jsonl", "/r"), ("mv inbox/a.json inbox/.done/", "/r"), ("echo x >> memory.md", "/r"),
             ("cargo test && echo done >> board.md", "/r"), ("/home/me/HarnessAgents/hive-old/board.md", ""),
+            // .. leaves the root; a cd elsewhere leaves it too.
+            ("cat ../../../../dev/app/memory.md", agent), ("cd /r/app && make && echo x >> memory.md", agent),
+            ("cd ~/dev/app; cat tasks.json", hive),
             // End boundary: a backup is not the file.
             ("/home/me/HarnessAgents/hive/agents/a/memory.md.bak", ""), ("cp memory.md.bak x", agent),
             // Start boundary, as before.
@@ -375,6 +444,15 @@ mod tests {
         assert!(on.adapters[0].enabled);
         assert!(TriggerConfig::load_or_default(&path).0.adapters[0].enabled, "saved");
         assert!(TriggerConfig::set_enabled(&path, "Nobody", true).unwrap_err().contains("no adapter named Nobody"));
+        // A key the user added (or a newer build wrote) survives a toggle.
+        let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        v["adapters"][0]["note"] = serde_json::json!("mine");
+        v["comment"] = serde_json::json!("keep me");
+        std::fs::write(&path, v.to_string()).unwrap();
+        TriggerConfig::set_enabled(&path, "Munder Difflin", false).unwrap();
+        let back: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!((back["adapters"][0]["note"].as_str(), back["comment"].as_str()), (Some("mine"), Some("keep me")));
+        assert_eq!(back["adapters"][0]["enabled"], false);
         std::fs::write(&path, "{ broken").unwrap();
         let err = TriggerConfig::set_enabled(&path, "Munder Difflin", false).unwrap_err();
         assert!(err.contains("Fix or delete the file"), "{err}");
