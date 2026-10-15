@@ -1,5 +1,5 @@
 // The trigger file card and the By trigger table: what an agent harness started.
-import type { TriggerRow, TriggerStatus } from "./types";
+import type { ActivityRow, TriggerRow, TriggerStatus } from "./types";
 
 /** "Found a <name> folder at <root>. Turn it on?" for the first adapter that is
  *  off but whose harness folder is on this machine; null otherwise. */
@@ -16,4 +16,9 @@ export function workShare(row: TriggerRow): number {
 /** Only typed prompts: the table would say nothing. */
 export function showTriggers(rows: TriggerRow[]): boolean {
   return rows.some((r) => r.trigger !== "typed prompt");
+}
+
+/** The Kind of work chart: work rows only (overhead and not-labelled rows have their own places). */
+export function workOnly(rows: ActivityRow[]): ActivityRow[] {
+  return rows.filter((x) => x.group === "work");
 }

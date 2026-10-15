@@ -34,3 +34,9 @@ test("the table is worth showing only when something other than typed prompts st
   assert.equal(H.showTriggers([typed, { trigger: "compaction", segments: 1, cost_usd: 1, work_usd: 0 }]), true);
   assert.equal(H.showTriggers([]), false);
 });
+
+test("the kind of work chart leaves out overhead and rows the model has not labelled", () => {
+  const rows = [{ activity: "coding", group: "work" }, { activity: "standup", group: "overhead" },
+    { activity: "not labelled by the model", group: "unlabelled" }, { activity: "research", group: "work" }];
+  assert.deepEqual(H.workOnly(rows).map((x) => x.activity), ["coding", "research"]);
+});

@@ -149,8 +149,9 @@ impl Store {
     }
 
     /// Use the trigger file's parse settings. When they differ from those the
-    /// cache was read with, the transcripts are read again on the next refresh
-    /// (model labels are kept). Returns whether that happened.
+    /// cache was read with, the transcripts are read again on the next refresh,
+    /// and the model labels are dropped: the line each was made from named the
+    /// trigger only when its adapter was on. Returns whether that happened.
     pub fn use_triggers(&self, fingerprint: &str) -> rusqlite::Result<bool> {
         let stored: String = self
             .conn
@@ -160,6 +161,7 @@ impl Store {
             return Ok(false);
         }
         self.conn.execute_batch(PARSED_TABLES)?;
+        self.conn.execute_batch("DELETE FROM segment_model_labels;")?;
         self.conn.execute_batch(SCHEMA)?;
         self.conn.execute(
             "INSERT INTO meta(key, value) VALUES ('triggers', ?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -325,7 +327,7 @@ mod tests {
     use crate::scanner::SubagentMeta;
 
     #[test]
-    fn a_new_trigger_file_means_the_transcripts_are_read_again_and_model_labels_stay() {
+    fn a_new_trigger_file_means_the_transcripts_and_model_labels_are_redone() {
         let store = seed();
         store.save_model_label("s|t", "m", "coding").unwrap();
         assert!(!store.use_triggers("").unwrap(), "no adapter on: the cache as it is");
@@ -335,7 +337,8 @@ mod tests {
         assert!(store.needs_parse(&path, 123, 456), "so every file is read again");
         let n: i64 = store.conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 0);
-        assert_eq!(store.model_labels("m").unwrap().len(), 1, "model labels are kept");
+        // The line the model was sent depends on the trigger file, so its labels go too.
+        assert!(store.model_labels("m").unwrap().is_empty(), "labels made with another trigger file are redone");
         assert!(!store.use_triggers("md-on").unwrap(), "the same file again: nothing to do");
     }
 

@@ -3,7 +3,7 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tansta
 import { save } from "@tauri-apps/plugin-dialog";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell, Legend } from "recharts";
 import { getActivity, getLabelProgress, getPriceTable, getSettings, getTriggers, refresh, runModelLabels, saveExport, setAdapterEnabled, setPriceTable, setSettings, stopModelLabels } from "../lib/ipc";
-import { foundHint, showTriggers, workShare } from "../lib/harness";
+import { foundHint, showTriggers, workOnly, workShare } from "../lib/harness";
 import { useFilters } from "../state/filters";
 import { ChartCard } from "../components/ChartCard";
 import { KpiRow } from "../components/KpiRow";
@@ -97,6 +97,8 @@ export default function Activity() {
   if (!r) return <p className="text-sm text-muted">Loading…</p>;
 
   const t = r.totals;
+  // The second chart is the kind of work: overhead has its own place in Work vs overhead.
+  const workRows = workOnly(r.rows);
   const diff = r.reconcile.claude_code_usd > 0 ? r.reconcile.ours_usd / r.reconcile.claude_code_usd - 1 : 0;
   const coverage = coverageText(r.coverage, usd);
   const labelsWord = llm ? "LLM labels" : "tool labels";
@@ -152,23 +154,18 @@ export default function Activity() {
           </ResponsiveContainer>
         </ChartCard>
 
-        <ChartCard title="Kind of work" subtitle={`${COST_LABEL}, by ${labelsWord}`}>
-          <ResponsiveContainer width="100%" height={Math.max(220, r.rows.length * 26)}>
-            <BarChart data={r.rows} layout="vertical" margin={{ left: 30 }}>
+        <ChartCard title="Kind of work" subtitle={`${COST_LABEL}, work only, by ${labelsWord}`}>
+          <ResponsiveContainer width="100%" height={Math.max(220, workRows.length * 26)}>
+            <BarChart data={workRows} layout="vertical" margin={{ left: 30 }}>
               <CartesianGrid strokeDasharray="3 3" stroke={tk.grid} />
               <XAxis type="number" tick={tk.tick} {...tk.axisLine} tickFormatter={(v) => usd(Number(v))} />
               <YAxis type="category" dataKey="activity" tick={tk.tickSmall} {...tk.axisLine} width={120} />
               <Tooltip formatter={(v) => usd(Number(v))} {...tk.tooltip} />
               <Bar dataKey="cost_usd" name="cost" radius={[0, 4, 4, 0]}>
-                {r.rows.map((x) => <Cell key={x.activity} fill={colorOf(x.group)} />)}
+                {workRows.map((x) => <Cell key={x.activity} fill={colorOf(x.group)} />)}
               </Bar>
             </BarChart>
           </ResponsiveContainer>
-          <div className="mt-2 flex gap-4 text-[11px] text-muted">
-            <span><span className="inline-block w-2 h-2 rounded-sm mr-1" style={{ background: workColor }} />work</span>
-            <span><span className="inline-block w-2 h-2 rounded-sm mr-1" style={{ background: overheadColor }} />overhead</span>
-            {llm && <span><span className="inline-block w-2 h-2 rounded-sm mr-1" style={{ background: unlabelledColor }} />not labelled by the model</span>}
-          </div>
         </ChartCard>
       </div>
 
