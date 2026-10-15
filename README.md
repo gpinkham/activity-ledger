@@ -105,4 +105,4 @@ MIT. See [LICENSE](LICENSE). Third-party licenses are in [THIRD_PARTY_NOTICES.md
 
 Claude and Claude Code are trademarks of Anthropic. The MIT license covers this code, not those names.
 
-Contact: gary@pinkham-software.com
+Questions, bugs or ideas: open an issue on this repository.
