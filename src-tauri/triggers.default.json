@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "adapters": [
+    {
+      "name": "Munder Difflin",
+      "enabled": false,
+      "root": "~/HarnessAgents/hive",
+      "prompt_triggers": [
+        { "starts_with": "You have new hive inbox message", "label": "inbox handling", "ids_after": "at least: " },
+        { "starts_with": "You are compacting one AI agent", "label": "memory upkeep" }
+      ],
+      "log_senders": [
+        { "from": "scheduler", "subject_contains": "standup", "label": "standup" },
+        { "from": "scheduler", "label": "scheduled job" }
+      ],
+      "bookkeeping_paths": ["/inbox/", "/outbox/", "memory.md", "board.md", "tasks.json", "log.jsonl"]
+    }
+  ]
+}

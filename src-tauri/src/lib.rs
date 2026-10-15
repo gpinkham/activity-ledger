@@ -11,6 +11,7 @@ pub mod scanner;
 pub mod settings;
 pub mod sessions;
 pub mod store;
+pub mod triggers;
 
 use commands::AppState;
 use pricing::PriceTable;
