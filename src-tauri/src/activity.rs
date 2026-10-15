@@ -1008,12 +1008,12 @@ mod tests {
     fn planning_tools_and_uncounted_tools_are_counted_too() {
         let mut t = ToolMix::default();
         for (name, tag) in [("TodoWrite", None), ("Agent", None), ("AskUserQuestion", None), ("Monitor", None),
-                            ("Edit", Some("scratch")), ("Bash", None), ("Edit", None), ("Read", None), ("Bash", Some("test"))] {
+                            ("Edit", Some("scratch")), ("Bash", None), ("Edit", None), ("Read", None), ("Bash", Some("test")), ("WebFetch", None)] {
             t.add(name, tag, None);
         }
         assert_eq!(t.meta, 2, "to-do list and sub-agent");
         assert_eq!(t.other, 3, "work tools no other count sees: a question, a monitor, a scratch edit");
-        assert_eq!((t.edits, t.reads, t.shell, t.tests), (1, 1, 2, 1));
+        assert_eq!((t.edits, t.reads, t.shell, t.tests, t.web), (1, 1, 2, 1, 1), "counted once, not also as other");
     }
 
     /// Store a model label for each segment whose rule label `pick` maps to one.
