@@ -14,7 +14,9 @@ Figures are estimates at Anthropic's published API list prices. They are not an 
 - A segment a harness starts that goes on to do the work counts as that work, labelled by what it did.
 - A harness is one adapter block in `triggers.json`; Munder Difflin is the first, off until you turn it on.
 
-<!-- SCREENSHOT: docs/screenshots/work-vs-overhead.png (Cost by activity with a harness adapter on) goes here. -->
+![Work vs overhead with the Munder Difflin adapter on](docs/screenshots/work-vs-overhead.png)
+
+In this run the overhead share is small: most wake-ups went on to do real work, and standups were the trigger with the most upkeep.
 
 ![Overview: totals and estimated cost over time](docs/screenshots/overview.png)
 
@@ -50,8 +52,6 @@ Figures are estimates at Anthropic's published API list prices. They are not an 
 The app asks the model for a JSON answer limited to the label list (Ollama's structured outputs) and turns thinking off, so a thinking model answers instead of reasoning. Use Ollama 0.9 or later: older versions cannot turn thinking off. Checked with llama2, qwen3:8b and gemma4:e2b. The first Label now loads the model, which can take minutes on a Mac without a GPU; the card says "Loading the model" meanwhile.
 
 **A toggle.** On Cost by activity, switch between **Tool labels** and **LLM labels**. The totals are the same in both views. Segments the model has not labelled yet are shown as "not labelled by the model", so nothing is dropped or double counted.
-
-![Cost by activity, Tool labels](docs/screenshots/activity-tool-labels.png)
 
 ## Privacy
 
