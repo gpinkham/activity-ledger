@@ -1,10 +1,10 @@
 // The menu bar budget gauge's settings: the monthly budget, the two thresholds and
 // whether the ring shows in the menu bar. Saved with the other settings.
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChartCard } from "./ChartCard";
 import { getSettings, setSettings } from "../lib/ipc";
-import { checkBudget } from "../lib/gauge";
+import { cardDraft, checkBudget } from "../lib/gauge";
 import type { AppSettings } from "../lib/types";
 
 const field = "border border-line rounded-md px-2 py-1 bg-surface text-ink w-full";
@@ -12,11 +12,20 @@ const field = "border border-line rounded-md px-2 py-1 bg-surface text-ink w-ful
 export function BudgetCard() {
   const qc = useQueryClient();
   const settings = useQuery({ queryKey: ["settings"], queryFn: getSettings });
-  const [draft, setDraft] = useState<AppSettings | null>(null);
-  useEffect(() => { if (settings.data) setDraft(settings.data); }, [settings.data]);
-  const saveMut = useMutation({ mutationFn: setSettings, onSuccess: () => qc.invalidateQueries() });
+  // What was typed, until it is saved. Settings fetched again (after any save in the
+  // app) do not overwrite it.
+  const [edits, setEdits] = useState<AppSettings | null>(null);
+  const saveMut = useMutation({
+    mutationFn: setSettings,
+    onSuccess: (_, next) => {
+      qc.setQueryData(["settings"], next);
+      setEdits(null);
+      qc.invalidateQueries();
+    },
+  });
+  const draft = cardDraft(edits, settings.data);
   if (!draft) return null;
-  const set = <K extends keyof AppSettings>(k: K, v: AppSettings[K]) => setDraft({ ...draft, [k]: v });
+  const set = <K extends keyof AppSettings>(k: K, v: AppSettings[K]) => setEdits({ ...draft, [k]: v });
   const problem = checkBudget(draft.monthly_budget_usd, draft.amber_pct, draft.red_pct);
   const daily = draft.monthly_budget_usd > 0 ? draft.monthly_budget_usd / 30.4 : 0;
 

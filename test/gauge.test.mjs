@@ -97,6 +97,14 @@ test("with no budget the panel shows the spend, no ring colour, and where to set
   assert.ok(h.includes("Estimate at configured rates, this Mac only, Claude Code only."));
 });
 
+test("what was typed in the budget card survives a refetch of the settings", () => {
+  const saved = { monthly_budget_usd: 300, amber_pct: 80, red_pct: 100 };
+  const typed = { ...saved, monthly_budget_usd: 450 };
+  assert.equal(G.cardDraft(typed, { ...saved }), typed, "a new fetch does not replace the edits");
+  assert.equal(G.cardDraft(null, saved), saved, "nothing typed: the saved settings");
+  assert.equal(G.cardDraft(null, undefined), undefined);
+});
+
 test("the panel refreshes only while it is shown", () => {
   let loads = 0;
   const live = new Map();

@@ -49,6 +49,10 @@ export function checkBudget(budget: number, amber: number, red: number): string 
   return null;
 }
 
+/** What the budget card shows: what was typed, else the saved settings. Settings
+ *  fetched again do not reset what was typed. */
+export const cardDraft = <T>(edits: T | null, fetched: T | undefined): T | undefined => edits ?? fetched;
+
 /**
  * The panel's refresh while it is on screen: load at once, then once a minute, and
  * nothing at all while it is hidden. The panel window is hidden, never closed, so a
