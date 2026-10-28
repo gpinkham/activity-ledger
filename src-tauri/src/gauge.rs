@@ -98,10 +98,23 @@ struct FileState {
     offset: u64,
     /// The file's first bytes, to tell an append from a rewrite of the same file.
     head: Vec<u8>,
+    /// The last bytes read, up to `offset`: a rewrite that keeps the start but not
+    /// the line the last poll ended on changes them.
+    tail: Vec<u8>,
     keys: HashSet<String>,
 }
 
-const HEAD: usize = 256;
+const HEAD: usize = 4096;
+const TAIL: u64 = 256;
+
+/// The `TAIL` bytes (fewer near the start) that end at `end`.
+fn tail_before(f: &mut std::fs::File, end: u64) -> Option<Vec<u8>> {
+    let from = end.saturating_sub(TAIL);
+    let mut b = vec![0u8; (end - from) as usize];
+    f.seek(SeekFrom::Start(from)).ok()?;
+    f.read_exact(&mut b).ok()?;
+    Some(b)
+}
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct PollStats {
@@ -197,9 +210,11 @@ impl Tally {
             return;
         }
         // An append keeps the same file, at least as long, starting with the same
-        // bytes. Anything else is read again from the start.
+        // bytes and with the byte the last poll ended on still in place. Anything
+        // else is read again from the start.
         let append = self.files.get(path).is_some_and(|st| {
             st.id == id && size >= st.offset && head.len() >= st.head.len() && head[..st.head.len()] == st.head[..]
+                && tail_before(&mut f, st.offset).is_some_and(|t| t == st.tail)
         });
         let offset = if append {
             self.files[path].offset
@@ -208,7 +223,7 @@ impl Tally {
                 stats.reread += 1;
             }
             self.forget_file(path);
-            self.files.insert(path.to_path_buf(), FileState { id, size: 0, mtime: 0, offset: 0, head: Vec::new(), keys: HashSet::new() });
+            self.files.insert(path.to_path_buf(), FileState { id, size: 0, mtime: 0, offset: 0, head: Vec::new(), tail: Vec::new(), keys: HashSet::new() });
             0
         };
         let mut buf = Vec::new();
@@ -240,6 +255,7 @@ impl Tally {
         let st = self.files.get_mut(path).expect("inserted above");
         st.keys.extend(st_keys);
         st.offset = offset + end as u64;
+        st.tail = tail_before(&mut f, st.offset).unwrap_or_default();
         st.id = id;
         st.size = size;
         st.mtime = mtime;
@@ -435,6 +451,22 @@ mod tests {
         let s = t.poll(&root, &clock);
         assert_eq!(s.reread, 1);
         assert!((t.spend(&list(), &clock).today - 50.0).abs() < 1e-9, "only the new file's two calls");
+
+        // Rewritten in place, same inode, longer, with the same first 4 KB and a new
+        // line of the same length where the last poll ended: only that line's bytes
+        // show the change.
+        let start = call("m9", "claude-opus-4-8", "2026-10-15T14:00:00.000Z", 0, M) + &"\n".repeat(4200);
+        let mut w = fs::OpenOptions::new().write(true).truncate(true).open(&f).unwrap();
+        w.write_all((start.clone() + &call("m8", "claude-opus-4-8", "2026-10-15T14:01:00.000Z", 0, M)).as_bytes()).unwrap();
+        drop(w);
+        t.poll(&root, &clock);
+        assert!((t.spend(&list(), &clock).today - 50.0).abs() < 1e-9);
+        let mut w = fs::OpenOptions::new().write(true).truncate(true).open(&f).unwrap();
+        w.write_all((start + &call("m6", "claude-opus-4-8", "2026-10-15T14:30:00.000Z", M, 0) + &"x".repeat(450) + "\n" + &"\n".repeat(900)).as_bytes()).unwrap();
+        drop(w);
+        let s = t.poll(&root, &clock);
+        assert_eq!(s.reread, 1, "the start is the same but the old end is not");
+        assert!((t.spend(&list(), &clock).today - 30.0).abs() < 1e-9, "m9 and m6, m8 gone: {}", t.spend(&list(), &clock).today);
 
         // Rewritten in place, same inode, longer, different start.
         let mut w = fs::OpenOptions::new().write(true).truncate(true).open(&f).unwrap();
