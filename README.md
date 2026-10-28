@@ -33,6 +33,8 @@ In this run the overhead share is small: most wake-ups went on to do real work, 
 
   The figures are the day view's figures for the same calls, read every 60 seconds from what the transcripts gained since the last read. Both count this Mac's local days. Like the day view, the gauge leaves out web search fees, which Cost by activity includes. Every figure is an estimate for this Mac's Claude Code only: not chat, not other machines, and not your invoice. If Claude Code's managed `modelPricing` setting is in `/Library/Application Support/ClaudeCode/managed-settings.json`, its rates are used and the panel says "at configured rates"; otherwise "at list price".
 
+  Clicking the icon while the panel is open hides it on focus loss and the same click may open it again; close it by clicking elsewhere.
+
 ## How labels work
 
 **Rules first.** Each segment is labelled by fixed rules over what it did, with no model call. The rules look at what started the segment (a prompt you typed, a compaction, a task notification) and at its tool mix: edits, notes, test runs and failing streaks, reads, web lookups, shell commands, and pull request or git range commands. The labels are:
