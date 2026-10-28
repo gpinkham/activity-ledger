@@ -5,8 +5,8 @@
 //! The figures are the day view's figures for the same calls. Each new chunk of a
 //! transcript goes through the same parser, a call kept in several files counts
 //! once (as `Store::mark_duplicates` does), and calls are summed by day and model
-//! key before pricing, as `Store::by_day` does. The one difference is the day: the
-//! day view's days are UTC dates; the gauge's are this Mac's local dates.
+//! key before pricing, as `Store::by_day` does, and both count this Mac's local
+//! days.
 
 use crate::budget::first_of_month;
 use crate::models::MessageRecord;
@@ -556,6 +556,8 @@ mod tests {
             ("m4", "claude-haiku-5-5", "2026-10-15T13:00:00.000Z", 150_000, 800, 0, 0, 0, false),
             ("m5", "claude-haiku-5-5", "2026-10-15T14:00:00.000Z", 9_000, 800, 0, 0, 0, false),
             ("m6", "claude-opus-5-5", "2026-10-14T23:00:00.000Z", 777, 777, 0, 0, 0, false),
+            // An evening call in New York: Oct 15 there, Oct 16 in UTC.
+            ("m7", "claude-opus-5-5", "2026-10-16T02:30:00.000Z", 100_000, 0, 0, 0, 0, false),
         ] {
             let mut usage = serde_json::json!({"input_tokens":i,"output_tokens":o,"cache_read_input_tokens":cr,
                 "cache_creation_input_tokens":w1 + w5,"cache_creation":{"ephemeral_1h_input_tokens":w1,"ephemeral_5m_input_tokens":w5}});
@@ -579,17 +581,32 @@ mod tests {
         let mut store = Store::open(&db).unwrap();
         do_refresh(&mut store, &root).unwrap();
         let table = PriceTable::seed();
+        // The day view and the gauge count the same local days, wherever the Mac is.
         for d in ["2026-10-15", "2026-10-14"] {
-            let f = Filters { from: Some(d.into()), to: Some(d.into()), ..Default::default() };
-            let day_view: f64 = store.by_day(&table, &f).unwrap().iter().map(|r| r.cost_usd).sum();
-            let clock = UtcClock(NaiveDate::parse_from_str(d, "%Y-%m-%d").unwrap());
-            let mut t = Tally::new();
-            t.poll(&root, &clock);
-            let gauge = t.spend(&GaugePrices { table: table.clone(), managed: None }, &clock).today;
-            assert!(day_view > 0.0);
-            assert_eq!((gauge * 100.0).round(), (day_view * 100.0).round(), "{d}: gauge {gauge} vs day view {day_view}");
-            assert!((gauge - day_view).abs() < 1e-9, "{d}: {gauge} vs {day_view}");
+            let date = NaiveDate::parse_from_str(d, "%Y-%m-%d").unwrap();
+            let clocks: [&dyn Clock; 2] = [&UtcClock(date), &NewYork2026 { today: date }];
+            for clock in clocks {
+                let f = Filters { from: Some(d.into()), to: Some(d.into()), ..Default::default() };
+                let day_view: f64 = store.by_day_with(&table, &f, clock).unwrap().iter().map(|r| r.cost_usd).sum();
+                let mut t = Tally::new();
+                t.poll(&root, clock);
+                let gauge = t.spend(&GaugePrices { table: table.clone(), managed: None }, clock).today;
+                assert!(day_view > 0.0);
+                assert_eq!((gauge * 100.0).round(), (day_view * 100.0).round(), "{d}: gauge {gauge} vs day view {day_view}");
+                assert!((gauge - day_view).abs() < 1e-9, "{d}: {gauge} vs {day_view}");
+            }
         }
+        // m7 is on Oct 15 in New York and on Oct 16 in UTC.
+        let oct = |d: &str, clock: &dyn Clock| -> f64 {
+            let f = Filters { from: Some(d.into()), to: Some(d.into()), ..Default::default() };
+            store.by_day_with(&table, &f, clock).unwrap().iter().map(|r| r.cost_usd).sum()
+        };
+        let ny = NewYork2026 { today: day(2026, 10, 15) };
+        let utc = UtcClock(day(2026, 10, 15));
+        let m7 = oct("2026-10-16", &utc);
+        assert!(m7 > 0.0);
+        assert!((oct("2026-10-15", &ny) - oct("2026-10-15", &utc) - m7).abs() < 1e-9, "m7 is on New York's Oct 15");
+        assert_eq!(oct("2026-10-16", &ny), 0.0);
         // The same local day, asked of the store by instants, is the same figure.
         let clock = NewYork2026 { today: day(2026, 10, 15) };
         let f = Filters {

@@ -1,5 +1,7 @@
 use crate::pricing::{without_long, PriceTable, TokenBreakdown};
+use crate::gauge::{Clock, SystemClock};
 use crate::store::Store;
+use chrono::{NaiveDate, NaiveDateTime};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -184,12 +186,28 @@ impl Store {
         rows.collect()
     }
 
+    /// Spend per local day, as this Mac sees it, so a day here is the day the menu bar
+    /// gauge calls today. `from` and `to` are local dates too.
     pub fn by_day(&self, price: &PriceTable, f: &Filters) -> rusqlite::Result<Vec<ByDay>> {
-        let (w, binds) = where_clause(f);
+        self.by_day_with(price, f, &SystemClock)
+    }
+
+    /// `by_day` with the days of `clock`. `ts` is UTC, so the query widens the date
+    /// filter by a day each side, sums by minute (every time zone is a whole number of
+    /// minutes off UTC), gives each minute its local day, and drops the days outside.
+    pub fn by_day_with(&self, price: &PriceTable, f: &Filters, clock: &dyn Clock) -> rusqlite::Result<Vec<ByDay>> {
+        let shift = |day: &Option<String>, by: i64| {
+            day.as_ref().map(|s| match NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+                Ok(d) => (d + chrono::Duration::days(by)).format("%Y-%m-%d").to_string(),
+                Err(_) => s.clone(),
+            })
+        };
+        let wide = Filters { from: shift(&f.from, -1), to: shift(&f.to, 1), ..f.clone() };
+        let (w, binds) = where_clause(&wide);
         let sql = format!(
-            "SELECT substr(ts,1,10) AS day, {m}, COUNT(*), SUM(input_tokens), SUM(output_tokens),
+            "SELECT substr(ts,1,16) AS minute, {m}, COUNT(*), SUM(input_tokens), SUM(output_tokens),
                     SUM(cache_read), SUM(ephemeral_1h), SUM(ephemeral_5m)
-             FROM messages {w} GROUP BY day, {m} ORDER BY day",
+             FROM messages {w} GROUP BY minute, {m}",
             m = price.model_sql()
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -203,7 +221,14 @@ impl Store {
         use std::collections::BTreeMap;
         let mut acc: BTreeMap<String, (i64, f64)> = BTreeMap::new();
         for row in rows {
-            let (day, model, msgs, input, output, cr, e1h, e5m) = row?;
+            let (minute, model, msgs, input, output, cr, e1h, e5m) = row?;
+            // A timestamp that does not parse keeps its UTC date, as before.
+            let day = NaiveDateTime::parse_from_str(&minute, "%Y-%m-%dT%H:%M")
+                .map(|t| clock.date_of(t.and_utc()).format("%Y-%m-%d").to_string())
+                .unwrap_or_else(|_| minute.chars().take(10).collect());
+            if f.from.as_ref().is_some_and(|from| day < *from) || f.to.as_ref().is_some_and(|to| day > *to) {
+                continue;
+            }
             let tb = TokenBreakdown { input, output, cache_creation_5m: e5m, cache_creation_1h: e1h, cache_read: cr, ..Default::default() };
             let e = acc.entry(day).or_insert((0, 0.0));
             e.0 += msgs;
@@ -343,6 +368,42 @@ mod tests {
         store.replace_file(&sf, &parsed).unwrap();
         store.rebuild_sessions().unwrap();
         store
+    }
+
+    /// A Mac four hours west of UTC.
+    struct West;
+    impl Clock for West {
+        fn today(&self) -> NaiveDate {
+            NaiveDate::from_ymd_opt(2026, 10, 2).unwrap()
+        }
+        fn date_of(&self, t: chrono::DateTime<chrono::Utc>) -> NaiveDate {
+            (t - chrono::Duration::hours(4)).date_naive()
+        }
+        fn start_of(&self, d: NaiveDate) -> chrono::DateTime<chrono::Utc> {
+            d.and_hms_opt(4, 0, 0).unwrap().and_utc()
+        }
+    }
+
+    #[test]
+    fn by_day_counts_local_days_and_a_date_filter_is_a_whole_local_day() {
+        let mut store = Store::open_in_memory();
+        let line = |id: &str, ts: &str| format!(
+            r#"{{"type":"assistant","sessionId":"s1","timestamp":"{ts}","message":{{"id":"{id}","role":"assistant","model":"claude-opus-5-5","usage":{{"input_tokens":1000000}}}}}}"#) + "\n";
+        // 03:30 UTC on Oct 2 is the evening of Oct 1 four hours west; 23:30 UTC on Oct 2
+        // is still Oct 2 there.
+        let content = line("a", "2026-10-02T03:30:00.000Z") + &line("b", "2026-10-02T23:30:00.000Z") + &line("c", "2026-10-03T12:00:00.000Z");
+        let sf = ScannedFile { path: "/x/p/s1.jsonl".into(), project: "p".into(), size: 1, mtime: 1, subagent: None };
+        store.replace_file(&sf, &parse_str("p", &content)).unwrap();
+        let p = PriceTable::seed();
+        let days = |f: &Filters| -> Vec<(String, i64)> {
+            store.by_day_with(&p, f, &West).unwrap().into_iter().map(|b| (b.day, b.messages)).collect()
+        };
+        let one = |d: &str| Filters { from: Some(d.into()), to: Some(d.into()), ..Default::default() };
+        assert_eq!(days(&Filters::default()), vec![("2026-10-01".into(), 1), ("2026-10-02".into(), 1), ("2026-10-03".into(), 1)]);
+        assert_eq!(days(&one("2026-10-01")), vec![("2026-10-01".into(), 1)], "its call is on the next UTC date");
+        assert_eq!(days(&one("2026-10-02")), vec![("2026-10-02".into(), 1)]);
+        let range = Filters { from: Some("2026-10-02".into()), to: Some("2026-10-03".into()), ..Default::default() };
+        assert_eq!(days(&range), vec![("2026-10-02".into(), 1), ("2026-10-03".into(), 1)]);
     }
 
     #[test]
