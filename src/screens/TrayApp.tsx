@@ -1,7 +1,9 @@
 // The panel window under the menu bar ring (index.html#tray). It reloads its
-// figures each time it is shown and once a minute while it is open.
+// figures each time it is shown and once a minute while it is open, and does
+// nothing while it is hidden (tray.rs sends gauge-shown and gauge-hidden).
 import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { panelPoller } from "../lib/gauge";
 import { getGauge, getGaugeSplit, openMainWindow } from "../lib/ipc";
 import type { GaugeView, WorkSplit } from "../lib/types";
 import { TrayPanel } from "./TrayPanel";
@@ -24,12 +26,14 @@ export default function TrayApp() {
   }, []);
 
   useEffect(() => {
-    void load();
-    const iv = setInterval(load, 60_000);
-    const off = listen("gauge-shown", () => void load());
+    // The window is created hidden and shown straight away, before these listeners
+    // exist, so the first show is taken as given.
+    const poll = panelPoller(() => void load(), 60_000);
+    poll.shown();
+    const offs = [listen("gauge-shown", poll.shown), listen("gauge-hidden", poll.hidden)];
     return () => {
-      clearInterval(iv);
-      void off.then((f) => f());
+      poll.hidden();
+      for (const off of offs) void off.then((f) => f());
     };
   }, [load]);
 

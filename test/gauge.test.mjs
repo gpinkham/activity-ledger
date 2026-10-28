@@ -97,6 +97,28 @@ test("with no budget the panel shows the spend, no ring colour, and where to set
   assert.ok(h.includes("Estimate at configured rates, this Mac only, Claude Code only."));
 });
 
+test("the panel refreshes only while it is shown", () => {
+  let loads = 0;
+  const live = new Map();
+  let next = 1;
+  const timers = { set: (f) => { live.set(next, f); return next++; }, clear: (id) => live.delete(id) };
+  const tick = () => { for (const f of live.values()) f(); };
+  const poll = G.panelPoller(() => loads++, 60_000, timers);
+  poll.shown();
+  assert.equal(loads, 1, "loads at once when shown");
+  tick(); tick();
+  assert.equal(loads, 3, "then once a minute");
+  poll.hidden();
+  assert.equal(poll.running, false);
+  tick(); tick(); tick();
+  assert.equal(loads, 3, "nothing while hidden");
+  poll.shown(); poll.shown();
+  assert.equal(live.size, 1, "showing twice keeps one timer");
+  assert.equal(loads, 5);
+  poll.hidden(); poll.hidden();
+  assert.equal(live.size, 0);
+});
+
 test("before the first figures arrive, and on an error", () => {
   assert.match(html({ view: null, split: null }), /Reading this month/);
   assert.match(html({ view: null, split: null, error: "no transcripts" }), /no transcripts/);

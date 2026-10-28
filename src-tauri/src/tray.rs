@@ -89,8 +89,14 @@ pub fn show_main(app: &AppHandle) {
         let _ = w.set_focus();
     }
     if let Some(p) = app.get_webview_window(PANEL) {
-        let _ = p.hide();
+        hide_panel(&p);
     }
+}
+
+/// Hide the panel and tell it so, so it stops refreshing until it is shown again.
+fn hide_panel(panel: &tauri::WebviewWindow) {
+    let _ = panel.hide();
+    let _ = tauri::Emitter::emit_to(panel, PANEL, "gauge-hidden", ());
 }
 
 fn toggle_panel(app: &AppHandle, rect: tauri::Rect) {
@@ -112,14 +118,14 @@ fn toggle_panel(app: &AppHandle, rect: tauri::Rect) {
             let hide = p.clone();
             p.on_window_event(move |e| {
                 if let WindowEvent::Focused(false) = e {
-                    let _ = hide.hide();
+                    hide_panel(&hide);
                 }
             });
             p
         }
     };
     if panel.is_visible().unwrap_or(false) {
-        let _ = panel.hide();
+        hide_panel(&panel);
         return;
     }
     // Centred under the icon.

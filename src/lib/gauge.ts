@@ -48,3 +48,34 @@ export function checkBudget(budget: number, amber: number, red: number): string 
   if (red > 1000) return "Red is a percentage of today's allowance: 1000 at most.";
   return null;
 }
+
+/**
+ * The panel's refresh while it is on screen: load at once, then once a minute, and
+ * nothing at all while it is hidden. The panel window is hidden, never closed, so a
+ * timer left running would refresh the whole store every minute for nobody.
+ */
+export function panelPoller(
+  load: () => void,
+  every: number,
+  timers: { set: (f: () => void, ms: number) => unknown; clear: (id: unknown) => void } = {
+    set: (f, ms) => setInterval(f, ms),
+    clear: (id) => clearInterval(id as ReturnType<typeof setInterval>),
+  },
+) {
+  let id: unknown = null;
+  const hidden = () => {
+    if (id !== null) timers.clear(id);
+    id = null;
+  };
+  return {
+    shown() {
+      hidden();
+      load();
+      id = timers.set(load, every);
+    },
+    hidden,
+    get running() {
+      return id !== null;
+    },
+  };
+}
