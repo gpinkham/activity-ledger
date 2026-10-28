@@ -128,17 +128,33 @@ fn toggle_panel(app: &AppHandle, rect: tauri::Rect) {
         hide_panel(&panel);
         return;
     }
-    // Centred under the icon.
+    // Centred under the icon, kept on the icon's screen.
     let scale = panel.scale_factor().unwrap_or(1.0);
     let pos = rect.position.to_physical::<f64>(scale);
     let size = rect.size.to_physical::<f64>(scale);
-    let x = pos.x + size.width / 2.0 - PANEL_W * scale / 2.0;
-    let y = pos.y + size.height;
-    let _ = panel.set_position(tauri::PhysicalPosition::new(x.max(0.0), y));
+    let centre = pos.x + size.width / 2.0;
+    let screen = panel
+        .monitor_from_point(centre, pos.y)
+        .ok()
+        .flatten()
+        .or_else(|| panel.current_monitor().ok().flatten())
+        .map(|m| (m.position().x as f64, m.size().width as f64));
+    let x = panel_x(centre, PANEL_W * scale, screen);
+    let _ = panel.set_position(tauri::PhysicalPosition::new(x, pos.y + size.height));
     let _ = panel.show();
     let _ = panel.set_focus();
     // The panel reloads its figures when it is shown.
     let _ = tauri::Emitter::emit_to(app, PANEL, "gauge-shown", ());
+}
+
+/// The panel's left edge, in physical pixels: centred on `centre`, and within the
+/// screen `(left, width)` when it is known, else at or right of 0.
+fn panel_x(centre: f64, panel_w: f64, screen: Option<(f64, f64)>) -> f64 {
+    let x = centre - panel_w / 2.0;
+    match screen {
+        Some((left, width)) => x.min(left + width - panel_w).max(left),
+        None => x.max(0.0),
+    }
 }
 
 /// Put the icon in the menu bar, or take it out, to match the setting.
@@ -205,6 +221,20 @@ pub fn start_poll(app: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_panel_stays_on_the_icons_screen() {
+        let screen = Some((0.0, 1440.0));
+        assert_eq!(panel_x(700.0, 300.0, screen), 550.0, "centred under the icon");
+        assert_eq!(panel_x(1430.0, 300.0, screen), 1140.0, "an icon near the right edge: the panel ends at the edge");
+        assert_eq!(panel_x(20.0, 300.0, screen), 0.0, "near the left edge");
+        // A second screen to the right of the first.
+        let second = Some((1440.0, 1920.0));
+        assert_eq!(panel_x(3350.0, 600.0, second), 2760.0);
+        assert_eq!(panel_x(1450.0, 600.0, second), 1440.0);
+        assert_eq!(panel_x(5000.0, 300.0, None), 4850.0, "no screen known: only kept at or right of 0");
+        assert_eq!(panel_x(10.0, 300.0, None), 0.0);
+    }
 
     fn pixel(px: &[u8], x: usize, y: usize) -> [u8; 4] {
         let i = (y * ICON as usize + x) * 4;
