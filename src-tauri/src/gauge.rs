@@ -77,8 +77,8 @@ impl Call {
         }
     }
 
-    /// A later line or copy of a call: keep each field's largest value, as the
-    /// parser does within a file.
+    /// A later line of a call in the same file: keep each field's largest value, as
+    /// the parser does.
     fn merge(&mut self, o: &Call) {
         self.input = self.input.max(o.input);
         self.output = self.output.max(o.output);
@@ -136,8 +136,9 @@ pub struct Spend {
 #[derive(Default)]
 pub struct Tally {
     files: HashMap<PathBuf, FileState>,
-    /// Call key -> the call, and the files holding a copy of it.
-    calls: HashMap<String, (Call, HashSet<PathBuf>)>,
+    /// Call key -> each file's copy of the call. A copy in more than one file counts
+    /// once, from the file written last, as `Store::mark_duplicates` keeps it.
+    calls: HashMap<String, HashMap<PathBuf, Call>>,
 }
 
 fn file_id(meta: &std::fs::Metadata) -> (u64, u64) {
@@ -161,9 +162,9 @@ impl Tally {
     fn forget_file(&mut self, path: &Path) {
         if let Some(st) = self.files.remove(path) {
             for k in st.keys {
-                if let Some((_, holders)) = self.calls.get_mut(&k) {
-                    holders.remove(path);
-                    if holders.is_empty() {
+                if let Some(copies) = self.calls.get_mut(&k) {
+                    copies.remove(path);
+                    if copies.is_empty() {
                         self.calls.remove(&k);
                     }
                 }
@@ -191,7 +192,10 @@ impl Tally {
             self.forget_file(&p);
         }
         // Calls from before this month no longer count; keep the map small.
-        self.calls.retain(|_, (c, _)| c.day.is_none_or(|d| d >= month_start));
+        self.calls.retain(|_, copies| {
+            copies.retain(|_, c| c.day.is_none_or(|d| d >= month_start));
+            !copies.is_empty()
+        });
         stats
     }
 
@@ -248,9 +252,11 @@ impl Tally {
             .collect();
         for (m, key) in parsed.messages.iter().zip(st_keys.iter()) {
             let call = Call::of(m, clock);
-            let entry = self.calls.entry(key.clone()).or_insert_with(|| (call.clone(), HashSet::new()));
-            entry.0.merge(&call);
-            entry.1.insert(path.to_path_buf());
+            // Within a file, a later line of the same call merges into it, as the
+            // parser merges a call's content blocks.
+            self.calls.entry(key.clone()).or_default().entry(path.to_path_buf())
+                .and_modify(|c| c.merge(&call))
+                .or_insert(call);
         }
         let st = self.files.get_mut(path).expect("inserted above");
         st.keys.extend(st_keys);
@@ -269,7 +275,14 @@ impl Tally {
         let today = clock.today();
         let month_start = first_of_month(today);
         let mut sums: BTreeMap<(NaiveDate, String), TokenBreakdown> = BTreeMap::new();
-        for (c, _) in self.calls.values() {
+        for copies in self.calls.values() {
+            // The newest file's copy, to the second; a tie goes to the first path.
+            let Some((_, c)) = copies.iter().min_by(|(a, _), (b, _)| {
+                let mtime = |p: &PathBuf| self.files.get(p).map_or(0, |f| f.mtime);
+                mtime(b).cmp(&mtime(a)).then_with(|| a.cmp(b))
+            }) else {
+                continue;
+            };
             let Some(day) = c.day else { continue };
             if day < month_start || day > today {
                 continue;
@@ -475,6 +488,47 @@ mod tests {
         let s = t.poll(&root, &clock);
         assert_eq!(s.reread, 1);
         assert!((t.spend(&list(), &clock).today - 5.0).abs() < 1e-9);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_copy_in_two_files_counts_from_the_file_written_last_as_the_day_view_does() {
+        let root = dir("newest");
+        let proj = root.join("-Users-me-proj");
+        let (a, b) = (proj.join("a.jsonl"), proj.join("b.jsonl"));
+        fs::write(&a, call("m1", "claude-opus-4-8", "2026-10-15T12:00:00.000Z", M, 0)).unwrap();
+        fs::write(&b, call("m1", "claude-opus-4-8", "2026-10-15T12:00:00.000Z", 2 * M, 0)).unwrap();
+        let clock = UtcClock(day(2026, 10, 15));
+        let at = |p: &Path, secs: u64| {
+            let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+            fs::File::options().write(true).open(p).unwrap().set_modified(t).unwrap();
+        };
+        let oct3 = 1_791_000_000; // 2026-10-03, in this month
+        let table = PriceTable::seed();
+        let day_view = || {
+            let mut store = Store::open_in_memory();
+            do_refresh(&mut store, &root).unwrap();
+            let f = Filters { from: Some("2026-10-15".into()), to: Some("2026-10-15".into()), ..Default::default() };
+            store.by_day_with(&table, &f, &clock).unwrap().iter().map(|r| r.cost_usd).sum::<f64>()
+        };
+        for (ta, tb, want, why) in [
+            (oct3 + 10, oct3, 5.0, "a is newer"),
+            (oct3, oct3 + 10, 10.0, "b is newer"),
+            (oct3 + 5, oct3 + 5, 5.0, "a tie goes to the first path"),
+        ] {
+            at(&a, ta);
+            at(&b, tb);
+            let mut t = Tally::new();
+            t.poll(&root, &clock);
+            let got = t.spend(&list(), &clock).today;
+            assert!((got - want).abs() < 1e-9, "{why}: {got}");
+            assert!((got - day_view()).abs() < 1e-9, "{why}: the day view keeps the same copy");
+        }
+        // The newer file goes: the other copy counts.
+        fs::remove_file(&a).unwrap();
+        let mut t = Tally::new();
+        t.poll(&root, &clock);
+        assert!((t.spend(&list(), &clock).today - 10.0).abs() < 1e-9);
         fs::remove_dir_all(&root).ok();
     }
 
