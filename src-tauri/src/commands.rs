@@ -1,9 +1,11 @@
 use crate::activity::{ActivityReport, LabelSource};
+use crate::budget::{self, BudgetView, Thresholds};
+use crate::gauge::{iso, Clock, SystemClock, Tally};
 use crate::exporter::build_bundle;
 use crate::labeller::{self, LabelProgress};
 use crate::metrics::{ByDay, ByModel, ByProject, ByTool, Filters, Totals, Workflow};
 use crate::parser::parse_with;
-use crate::pricing::PriceTable;
+use crate::pricing::{GaugePrices, ManagedPricing, PriceTable, RateSource};
 use crate::scanner::scan_dir;
 use crate::sessions::{SessionDetail, SessionSummary};
 use crate::settings::AppSettings;
@@ -30,6 +32,10 @@ pub struct AppState {
     pub triggers_path: PathBuf,
     pub triggers_error: Mutex<Option<String>>,
     pub home: Option<PathBuf>,
+    /// The menu bar gauge's running tally (gauge.rs).
+    pub gauge: Mutex<Tally>,
+    /// Claude Code's managed settings file, read for `modelPricing` only.
+    pub managed_settings: PathBuf,
 }
 
 /// The trigger file as the settings card shows it.
@@ -234,10 +240,87 @@ pub fn get_settings(state: tauri::State<AppState>) -> Result<AppSettings, String
 }
 
 #[tauri::command]
-pub fn set_settings(state: tauri::State<AppState>, settings: AppSettings) -> Result<(), String> {
+pub fn set_settings(app: tauri::AppHandle, state: tauri::State<AppState>, settings: AppSettings) -> Result<(), String> {
     settings.save(&state.settings_path).map_err(|e| e.to_string())?;
     *state.settings.lock().map_err(|e| e.to_string())? = settings;
+    // The menu bar icon follows "Show in menu bar"; a new budget redraws the ring.
+    crate::tray::sync(&app).map_err(|e| e.to_string())?;
+    crate::tray::refresh_icon(&app);
     Ok(())
+}
+
+/// What the menu bar panel shows, apart from the work and overhead split.
+#[derive(Debug, Serialize)]
+pub struct GaugeView {
+    /// Today's local date.
+    pub day: String,
+    pub budget: BudgetView,
+    /// "configured" when Claude Code's managed modelPricing priced it, else "list".
+    pub rate_source: RateSource,
+}
+
+/// Read what the transcripts gained (when `poll`), then price today and the month.
+pub fn gauge_view(state: &AppState, clock: &dyn Clock, poll: bool) -> Result<GaugeView, String> {
+    let settings = state.settings.lock().map_err(|e| e.to_string())?.clone();
+    let prices = GaugePrices {
+        table: state.price.lock().map_err(|e| e.to_string())?.clone(),
+        managed: ManagedPricing::load(&state.managed_settings),
+    };
+    let mut tally = state.gauge.lock().map_err(|e| e.to_string())?;
+    if poll {
+        tally.poll(&state.claude_root, clock);
+    }
+    let spend = tally.spend(&prices, clock);
+    let t = Thresholds { amber: settings.amber_pct / 100.0, red: settings.red_pct / 100.0 };
+    Ok(GaugeView {
+        day: spend.day.to_string(),
+        budget: budget::view(settings.monthly_budget_usd, spend.day, spend.today, spend.month_to_date, t),
+        rate_source: prices.source(),
+    })
+}
+
+#[tauri::command]
+pub fn get_gauge(state: tauri::State<AppState>) -> Result<GaugeView, String> {
+    gauge_view(&state, &SystemClock, true)
+}
+
+/// Today's spend split into real work and overhead, as the Cost by activity view
+/// labels it (its rules), at the price table's rates.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct WorkSplit {
+    pub work_usd: f64,
+    pub overhead_usd: f64,
+}
+
+/// The split for one local day: the cache is brought up to date, then read for
+/// the instants the day spans.
+pub fn work_split(state: &AppState, clock: &dyn Clock) -> Result<WorkSplit, String> {
+    let (config, _) = reload_triggers(state)?;
+    let mut store = state.store.lock().map_err(|e| e.to_string())?;
+    store.sender_labels = config.sender_labels(state.home.as_deref());
+    do_refresh_with(&mut store, &state.claude_root, &config.matcher(state.home.as_deref())).map_err(|e| e.to_string())?;
+    let today = clock.today();
+    let f = Filters {
+        from_ts: Some(iso(clock.start_of(today))),
+        to_ts: Some(iso(clock.start_of(today.succ_opt().unwrap_or(today)))),
+        ..Default::default()
+    };
+    let price = state.price.lock().map_err(|e| e.to_string())?;
+    let settings = state.settings.lock().map_err(|e| e.to_string())?;
+    let report = store.activity_by(&price, &f, &settings, LabelSource::Rule).map_err(|e| e.to_string())?;
+    let overhead: f64 = report.rows.iter().filter(|r| r.group == "overhead").map(|r| r.cost_usd).sum();
+    let all: f64 = report.rows.iter().map(|r| r.cost_usd).sum();
+    Ok(WorkSplit { work_usd: all - overhead, overhead_usd: overhead })
+}
+
+#[tauri::command]
+pub fn get_gauge_split(state: tauri::State<AppState>) -> Result<WorkSplit, String> {
+    work_split(&state, &SystemClock)
+}
+
+#[tauri::command]
+pub fn open_main_window(app: tauri::AppHandle) {
+    crate::tray::show_main(&app);
 }
 
 #[tauri::command]
@@ -271,7 +354,93 @@ pub fn save_export(path: String, contents: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{DateTime, NaiveDate, TimeZone, Utc};
     use std::fs;
+
+    struct UtcDay(NaiveDate);
+    impl Clock for UtcDay {
+        fn today(&self) -> NaiveDate {
+            self.0
+        }
+        fn date_of(&self, t: DateTime<Utc>) -> NaiveDate {
+            t.date_naive()
+        }
+        fn start_of(&self, d: NaiveDate) -> DateTime<Utc> {
+            Utc.from_utc_datetime(&d.and_hms_opt(0, 0, 0).unwrap())
+        }
+    }
+
+    fn state_for(root: &Path, data: &Path, managed: &str) -> AppState {
+        fs::create_dir_all(data).unwrap();
+        let managed_settings = data.join("managed-settings.json");
+        if !managed.is_empty() {
+            fs::write(&managed_settings, managed).unwrap();
+        }
+        AppState {
+            store: Mutex::new(Store::open(&data.join("cache.sqlite")).unwrap()),
+            price: Mutex::new(PriceTable::seed()),
+            claude_root: root.to_path_buf(),
+            settings: Mutex::new(AppSettings { monthly_budget_usd: 310.0, ..Default::default() }),
+            price_path: data.join("prices.json"),
+            settings_path: data.join("settings.json"),
+            label_progress: Mutex::new(LabelProgress::default()),
+            label_stop: Default::default(),
+            triggers: Mutex::new(TriggerConfig::default()),
+            triggers_path: data.join("triggers.json"),
+            triggers_error: Mutex::new(None),
+            home: None,
+            gauge: Mutex::new(Tally::new()),
+            managed_settings,
+        }
+    }
+
+    #[test]
+    fn the_panels_work_and_overhead_add_up_to_the_gauges_today() {
+        let dir = std::env::temp_dir().join(format!("ci_gauge_cmd_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let proj = dir.join("projects").join("-Users-me-projA");
+        fs::create_dir_all(&proj).unwrap();
+        // The fixture ends on a compaction; the call that answers it is the overhead.
+        let after = r#"{"type":"assistant","sessionId":"sa","timestamp":"2026-10-01T10:07:00.000Z","message":{"id":"msg_after","role":"assistant","model":"claude-opus-5-5","usage":{"input_tokens":2000,"output_tokens":500}}}"#;
+        fs::write(proj.join("sa.jsonl"), format!("{}{after}\n", include_str!("../tests/fixtures/activity.jsonl"))).unwrap();
+        let state = state_for(&dir.join("projects"), &dir.join("data"), "");
+        let clock = UtcDay(NaiveDate::from_ymd_opt(2026, 10, 1).unwrap());
+
+        let v = gauge_view(&state, &clock, true).unwrap();
+        assert_eq!(v.day, "2026-10-01");
+        assert_eq!(v.rate_source, RateSource::List);
+        assert!(v.budget.today > 0.0);
+        assert!((v.budget.daily_allowance - 10.0).abs() < 1e-9, "310 over October's 31 days");
+
+        let split = work_split(&state, &clock).unwrap();
+        assert!(split.overhead_usd > 0.0, "the fixture's compaction is overhead");
+        assert!(split.work_usd > 0.0);
+        // The same calls. Cost by activity also charges the fixture's 3 web searches
+        // ($10 per 1,000); the day view, and so the gauge, leaves them out.
+        let web = 3.0 * 10.0 / 1000.0;
+        assert!((split.work_usd + split.overhead_usd - (v.budget.today + web)).abs() < 1e-9, "{split:?} vs {}", v.budget.today);
+
+        // The next day has none of it.
+        let next = UtcDay(NaiveDate::from_ymd_opt(2026, 10, 2).unwrap());
+        assert_eq!(gauge_view(&state, &next, true).unwrap().budget.today, 0.0);
+        assert_eq!(work_split(&state, &next).unwrap(), WorkSplit { work_usd: 0.0, overhead_usd: 0.0 });
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_managed_model_pricing_file_switches_the_rates_and_the_label() {
+        let dir = std::env::temp_dir().join(format!("ci_gauge_managed_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let proj = dir.join("projects").join("-Users-me-projA");
+        fs::create_dir_all(&proj).unwrap();
+        fs::write(proj.join("sa.jsonl"), include_str!("../tests/fixtures/activity.jsonl")).unwrap();
+        let clock = UtcDay(NaiveDate::from_ymd_opt(2026, 10, 1).unwrap());
+        let list = gauge_view(&state_for(&dir.join("projects"), &dir.join("list"), ""), &clock, true).unwrap();
+        let half = gauge_view(&state_for(&dir.join("projects"), &dir.join("conf"), r#"{"modelPricing":{"multiplier":0.5}}"#), &clock, true).unwrap();
+        assert_eq!(half.rate_source, RateSource::Configured);
+        assert!((half.budget.today - list.budget.today / 2.0).abs() < 1e-9);
+        fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn refresh_ingests_a_fixture_tree() {

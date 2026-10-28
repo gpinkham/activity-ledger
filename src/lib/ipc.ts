@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   Filters, Totals, ByModel, ByTool, ByDay, ByProject, Workflow, PriceTable, RefreshSummary,
   SessionSummary, SessionDetail, ActivityReport, AppSettings, LabelProgress, TriggerStatus,
+  GaugeView, WorkSplit,
 } from "./types";
 import type { LabelSource } from "./labelSource";
 
@@ -28,4 +29,7 @@ export const runModelLabels = (filters: Filters) => invoke<void>("run_model_labe
 export const getLabelProgress = () => invoke<LabelProgress>("get_label_progress");
 export const stopModelLabels = () => invoke<void>("stop_model_labels");
 export const getTriggers = () => invoke<TriggerStatus>("get_triggers");
+export const getGauge = () => invoke<GaugeView>("get_gauge");
+export const getGaugeSplit = () => invoke<WorkSplit>("get_gauge_split");
+export const openMainWindow = () => invoke<void>("open_main_window");
 export const setAdapterEnabled = (name: string, enabled: boolean) => invoke<TriggerStatus>("set_adapter_enabled", { name, enabled });

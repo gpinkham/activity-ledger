@@ -29,6 +29,9 @@ In this run the overhead share is small: most wake-ups went on to do real work, 
 - **Cost by activity:** every session is cut into segments, one per prompt, and each segment gets a label. Cost, calls and tokens are totalled per label, per day, and split into work and overhead.
 - **Workflow, Projects, Sessions:** tool use, cost per project, and a drill down into each session.
 - **Export:** a JSON summary with hashed ids and no prompt text, saved to a file you choose.
+- **Menu bar budget** (optional, off by default): a ring in the menu bar for today's spend against a monthly budget, for anyone working to a company API budget. The budget is spread evenly over the calendar month, so a $300 budget in a 31 day month allows $9.68 a day; days start at local midnight. The ring is green below 80% of today's allowance, amber from 80% and red from 100% (both thresholds can be changed). A click opens today's spend, the month to date, the pace, the projected month end, what is left per day, and today's split between work and overhead. Set it up under Cost by activity, Menu bar budget. With it on, closing the main window keeps the app in the menu bar and out of the Dock.
+
+  The figures are the day view's figures for the same calls, read every 60 seconds from what the transcripts gained since the last read. Two caveats: the day view's days are UTC dates, the gauge's are local dates; and like the day view, the gauge leaves out web search fees, which Cost by activity includes. Every figure is an estimate for this Mac's Claude Code only: not chat, not other machines, and not your invoice. If Claude Code's managed `modelPricing` setting is in `/Library/Application Support/ClaudeCode/managed-settings.json`, its rates are used and the panel says "at configured rates"; otherwise "at list price".
 
 ## How labels work
 
@@ -61,6 +64,7 @@ The app asks the model for a JSON answer limited to the label list (Ollama's str
 - Its cache (a SQLite file in the app's data folder) keeps counts, token totals, costs, timestamps, tool names, labels, model names, the Claude Code version, git branch names, message and tool call ids, the session titles Claude Code wrote, and the project folder and transcript file each record came from. With a harness adapter on, it also keeps each harness prompt's trigger label and the message ids the prompt named. It does not keep your prompts, Claude's replies, tool inputs or commands. Tool inputs are read in memory only to decide a tag such as "test run".
 - The only network call is the optional labelling pass, to your Ollama. By default it must be on this machine (a loopback address). A remote host is used only if you tick "Allow a remote Ollama". For each segment it sends tool counts and a short excerpt of the opening prompt. Only the label that comes back is kept.
 - The trigger file holds phrases and paths only. With an adapter on, the app reads that harness's log on this machine to pick a label (a standup, a scheduled job). It keeps the label and the ids of the messages a prompt named, nothing else from the log.
+- The menu bar budget reads the same transcripts, and Claude Code's managed settings file for `modelPricing` only. It changes neither.
 - No telemetry, no accounts, no calls to Anthropic or anyone else.
 
 ![Local model settings](docs/screenshots/privacy-settings.png)
@@ -92,6 +96,10 @@ npm run build:universal
 ```
 
 The built app is under `src-tauri/target/.../bundle/macos/`. It is not signed or notarized, so the first time you open it, right click it and choose **Open**.
+
+### Signed build (maintainers)
+
+`scripts/sign-notarize.sh` builds the universal app, signs it with a Developer ID and the hardened runtime, has Apple notarize it, staples the ticket and zips it. It runs on the Mac that holds the certificate, uses the identity and the keychain profile by name only, and reads no secret from a file or a variable. The comments at its top list the one-time setup.
 
 ### Test
 

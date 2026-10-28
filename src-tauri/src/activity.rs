@@ -346,7 +346,7 @@ impl Store {
         let (w, binds) = where_clause(f);
         // Prompts are read without the date filter so a call just inside the range
         // still finds the prompt that started it.
-        let undated = Filters { from: None, to: None, project: f.project.clone() };
+        let undated = Filters { project: f.project.clone(), ..Default::default() };
         let (pw, pbinds) = where_clause(&undated);
 
         // Sub-agent transcripts: file -> (agent, the call that started it).

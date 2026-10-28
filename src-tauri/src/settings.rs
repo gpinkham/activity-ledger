@@ -19,6 +19,14 @@ pub struct AppSettings {
     /// Let the pass use a non-loopback Ollama URL. Segment excerpts then leave
     /// this machine; the card warns. Off by default.
     pub allow_remote_ollama: bool,
+    /// The menu bar gauge's monthly budget in US dollars. 0 is "not set".
+    pub monthly_budget_usd: f64,
+    /// The ring turns amber at this share of today's allowance, in percent.
+    pub amber_pct: f64,
+    /// And red at this one.
+    pub red_pct: f64,
+    /// Show the budget gauge in the menu bar. Off by default.
+    pub show_in_menu_bar: bool,
 }
 
 impl Default for AppSettings {
@@ -30,6 +38,10 @@ impl Default for AppSettings {
             local_output_limit: 4_000,
             model_labels_enabled: false,
             allow_remote_ollama: false,
+            monthly_budget_usd: 0.0,
+            amber_pct: 80.0,
+            red_pct: 100.0,
+            show_in_menu_bar: false,
         }
     }
 }
@@ -62,6 +74,12 @@ mod tests {
         let mine = AppSettings { local_context_limit: 128_000, ollama_model: "qwen3:32b".into(), ..s };
         mine.save(&path).unwrap();
         assert_eq!(AppSettings::load_or_default(&path), mine);
+
+        // A file saved before the gauge existed loads with the gauge off and no budget.
+        std::fs::write(&path, r#"{"ollama_model":"qwen3:32b"}"#).unwrap();
+        let old = AppSettings::load_or_default(&path);
+        assert!(!old.show_in_menu_bar);
+        assert_eq!((old.monthly_budget_usd, old.amber_pct, old.red_pct), (0.0, 80.0, 100.0));
 
         // A file saved by an older build with a field this one no longer has still loads.
         std::fs::write(&path, r#"{"ollama_model":"qwen3:32b","retired_field":"x"}"#).unwrap();

@@ -78,7 +78,17 @@ export interface AppSettings {
   ollama_url: string; ollama_model: string;
   local_context_limit: number; local_output_limit: number;
   model_labels_enabled: boolean; allow_remote_ollama: boolean;
+  /** The menu bar gauge: monthly budget in USD (0 = not set), thresholds in percent. */
+  monthly_budget_usd: number; amber_pct: number; red_pct: number; show_in_menu_bar: boolean;
 }
+export type Ring = "none" | "green" | "amber" | "red";
+export interface BudgetView {
+  monthly_budget: number; days_in_month: number; days_elapsed: number; days_left: number;
+  daily_allowance: number; today: number; today_share: number; month_to_date: number;
+  on_pace: number; projected: number; remaining_per_day: number; ring: Ring;
+}
+export interface GaugeView { day: string; budget: BudgetView; rate_source: "configured" | "list" }
+export interface WorkSplit { work_usd: number; overhead_usd: number }
 export interface LabelProgress {
   running: boolean; loading: boolean; total: number; done: number; labelled: number; failed: number; stopped: string | null;
 }

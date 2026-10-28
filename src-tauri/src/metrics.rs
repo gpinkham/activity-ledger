@@ -7,6 +7,11 @@ pub struct Filters {
     pub from: Option<String>,
     pub to: Option<String>,
     pub project: Option<String>,
+    /// A window of exact instants, `from_ts <= ts < to_ts`, as ISO-8601 UTC strings.
+    /// `from` and `to` are UTC calendar days; these let a caller ask for a local day
+    /// (the menu bar gauge's "today"), which can span two UTC dates.
+    pub from_ts: Option<String>,
+    pub to_ts: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -78,6 +83,14 @@ pub(crate) fn where_clause(f: &Filters) -> (String, Vec<(String, String)>) {
     if let Some(to) = &f.to {
         clauses.push("substr(ts,1,10) <= :to".to_string());
         binds.push((":to".into(), to.clone()));
+    }
+    if let Some(from_ts) = &f.from_ts {
+        clauses.push("ts >= :from_ts".to_string());
+        binds.push((":from_ts".into(), from_ts.clone()));
+    }
+    if let Some(to_ts) = &f.to_ts {
+        clauses.push("ts < :to_ts".to_string());
+        binds.push((":to_ts".into(), to_ts.clone()));
     }
     let sql = format!("WHERE {}", clauses.join(" AND "));
     (sql, binds)

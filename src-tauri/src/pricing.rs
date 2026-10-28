@@ -259,9 +259,205 @@ impl PriceTable {
     }
 }
 
+/// Where the gauge's rates come from: Claude Code's managed `modelPricing`
+/// setting, or this app's own price table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RateSource {
+    /// "at configured rates"
+    Configured,
+    /// "at list price"
+    List,
+}
+
+/// The machine-wide managed settings file Claude Code reads on macOS. Read only.
+pub const MANAGED_SETTINGS_PATH: &str = "/Library/Application Support/ClaudeCode/managed-settings.json";
+
+/// One `modelPricing.overrides` row: USD per million tokens. `cache_write` prices
+/// both the 5 minute and the 1 hour cache writes.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+pub struct ManagedRate {
+    pub input: f64,
+    pub output: f64,
+    #[serde(rename = "cacheRead")]
+    pub cache_read: f64,
+    #[serde(rename = "cacheWrite")]
+    pub cache_write: f64,
+}
+
+/// Claude Code's managed `modelPricing` setting, as Claude Code applies it:
+/// `{ "multiplier": 0.85, "overrides": { "<model id>": { input, output, cacheRead,
+/// cacheWrite } } }`. A matching row is charged exactly as written (no fast-mode or
+/// US-only surcharge, one rate for long prompts); the multiplier scales every cost,
+/// overridden or not. An invalid row or multiplier is skipped and the rest apply.
+/// A key that is one of the price table's model ids also covers that model's dated
+/// and provider spellings; any other key matches its exact id only (ignoring case).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManagedPricing {
+    pub multiplier: f64,
+    overrides: Vec<(String, ManagedRate)>,
+}
+
+impl ManagedPricing {
+    /// The `modelPricing` in a managed settings file's text. None when the file has
+    /// none, or when what it has would change nothing (no valid row, multiplier 1).
+    pub fn from_settings_json(text: &str) -> Option<ManagedPricing> {
+        let v: serde_json::Value = serde_json::from_str(text).ok()?;
+        let mp = v.get("modelPricing")?.as_object()?;
+        let multiplier = mp
+            .get("multiplier")
+            .and_then(|m| m.as_f64())
+            .filter(|m| *m > 0.0 && *m <= 10.0)
+            .unwrap_or(1.0);
+        let mut overrides: Vec<(String, ManagedRate)> = Vec::new();
+        if let Some(rows) = mp.get("overrides").and_then(|o| o.as_object()) {
+            for (key, row) in rows {
+                let Ok(r) = serde_json::from_value::<ManagedRate>(row.clone()) else { continue };
+                let ok = [r.input, r.output, r.cache_read, r.cache_write].iter().all(|x| (0.0..=10_000.0).contains(x));
+                let key = key.to_lowercase();
+                // As in Claude Code, a repeated key keeps the earlier row.
+                if ok && !overrides.iter().any(|(k, _)| *k == key) {
+                    overrides.push((key, r));
+                }
+            }
+        }
+        if overrides.is_empty() && multiplier == 1.0 {
+            return None;
+        }
+        Some(ManagedPricing { multiplier, overrides })
+    }
+
+    /// The managed file's `modelPricing`, if the file exists and has one.
+    pub fn load(path: &Path) -> Option<ManagedPricing> {
+        ManagedPricing::from_settings_json(&std::fs::read_to_string(path).ok()?)
+    }
+
+    /// A provider spelling reduced to the first-party id: `us.anthropic.claude-x-v1:0`
+    /// (Bedrock) and `claude-x@20250101` (Vertex) both become `claude-x`.
+    fn first_party(model: &str) -> String {
+        let m = model.to_lowercase();
+        let m = m.rsplit_once("anthropic.").map(|(_, rest)| rest.to_string()).unwrap_or(m);
+        let m = m.split('@').next().unwrap_or("").to_string();
+        match m.rsplit_once("-v") {
+            Some((head, tail)) if tail.split(':').all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())) => head.to_string(),
+            _ => m,
+        }
+    }
+
+    fn row(&self, table: &PriceTable, model: &str) -> Option<ManagedRate> {
+        let exact = model.to_lowercase();
+        if let Some((_, r)) = self.overrides.iter().find(|(k, _)| *k == exact) {
+            return Some(*r);
+        }
+        let fp = ManagedPricing::first_party(model);
+        self.overrides
+            .iter()
+            .filter(|(k, _)| table.models.contains_key(k.as_str()))
+            .filter(|(k, _)| fp == *k || (fp.starts_with(k.as_str()) && fp[k.len()..].starts_with('-')))
+            .max_by_key(|(k, _)| k.len())
+            .map(|(_, r)| *r)
+    }
+
+    /// A rollup row's cost at the configured rates: a model key as `PriceTable::cost`
+    /// takes it, with any fast and long-prompt marks.
+    pub fn cost(&self, table: &PriceTable, model: &str, tb: &TokenBreakdown) -> f64 {
+        let base = without_long(model).trim_end_matches(FAST_SUFFIX);
+        let raw = match self.row(table, base) {
+            Some(r) => {
+                (tb.input as f64 * r.input
+                    + tb.output as f64 * r.output
+                    + tb.cache_read as f64 * r.cache_read
+                    + (tb.cache_creation_5m + tb.cache_creation_1h) as f64 * r.cache_write)
+                    / 1_000_000.0
+                    + tb.web_searches as f64 * WEB_SEARCH_USD
+            }
+            None => table.cost(model, tb),
+        };
+        raw * self.multiplier
+    }
+}
+
+/// The gauge's prices: the price table, with the managed `modelPricing` on top
+/// when there is one.
+#[derive(Debug, Clone)]
+pub struct GaugePrices {
+    pub table: PriceTable,
+    pub managed: Option<ManagedPricing>,
+}
+
+impl GaugePrices {
+    pub fn source(&self) -> RateSource {
+        if self.managed.is_some() { RateSource::Configured } else { RateSource::List }
+    }
+
+    pub fn cost(&self, model: &str, tb: &TokenBreakdown) -> f64 {
+        match &self.managed {
+            Some(m) => m.cost(&self.table, model, tb),
+            None => self.table.cost(model, tb),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn managed(json: &str) -> Option<ManagedPricing> {
+        ManagedPricing::from_settings_json(json)
+    }
+
+    #[test]
+    fn managed_rows_are_charged_exactly_as_written_and_the_multiplier_scales_everything() {
+        let t = PriceTable::seed();
+        let m = managed(r#"{"modelPricing":{"multiplier":0.5,"overrides":{"claude-sonnet-4-6":{"input":2,"output":10,"cacheRead":0.2,"cacheWrite":3}}}}"#).unwrap();
+        let tb = TokenBreakdown { input: 1_000_000, output: 1_000_000, cache_read: 1_000_000, cache_creation_5m: 1_000_000, cache_creation_1h: 1_000_000, ..Default::default() };
+        // (2 + 10 + 0.2 + 3 + 3) * 0.5: one write rate for both lifetimes.
+        assert!((m.cost(&t, "claude-sonnet-4-6", &tb) - 9.1).abs() < 1e-9);
+        // No fast-mode surcharge on a managed row.
+        assert!((m.cost(&t, "claude-sonnet-4-6:fast", &tb) - 9.1).abs() < 1e-9);
+        // A model with no row is list price, still scaled.
+        let one = TokenBreakdown { input: 1_000_000, ..Default::default() };
+        assert!((m.cost(&t, "claude-opus-4-8", &one) - 2.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_built_in_id_covers_its_dated_and_provider_spellings_another_key_only_itself() {
+        let t = PriceTable::seed();
+        let m = managed(r#"{"modelPricing":{"overrides":{
+            "claude-sonnet-4-6":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0},
+            "My-Gateway-Alias":{"input":7,"output":0,"cacheRead":0,"cacheWrite":0}}}}"#).unwrap();
+        let one = TokenBreakdown { input: 1_000_000, ..Default::default() };
+        for id in ["claude-sonnet-4-6", "claude-sonnet-4-6-20260101", "us.anthropic.claude-sonnet-4-6-v1:0", "claude-sonnet-4-6@20260101", "CLAUDE-SONNET-4-6"] {
+            assert!((m.cost(&t, id, &one) - 1.0).abs() < 1e-9, "{id}");
+        }
+        assert!((m.cost(&t, "my-gateway-alias", &one) - 7.0).abs() < 1e-9, "exact, ignoring case");
+        assert!((m.cost(&t, "my-gateway-alias-2", &one) - 5.0).abs() < 1e-9, "not a prefix: the table's default row");
+        assert!((m.cost(&t, "claude-sonnet-4-5", &one) - 3.0).abs() < 1e-9, "another model keeps list price");
+    }
+
+    #[test]
+    fn invalid_managed_rows_and_multipliers_are_skipped_and_the_rest_apply() {
+        let m = managed(r#"{"modelPricing":{"multiplier":11,"overrides":{
+            "claude-opus-4-8":{"input":1,"output":1,"cacheRead":1},
+            "claude-haiku-4-5":{"input":-1,"output":1,"cacheRead":1,"cacheWrite":1},
+            "claude-sonnet-4-6":{"input":1,"output":1,"cacheRead":1,"cacheWrite":1}}}}"#).unwrap();
+        assert_eq!(m.multiplier, 1.0, "out of (0, 10]: ignored");
+        assert_eq!(m.overrides.len(), 1, "a row missing a rate, and a negative rate, are skipped");
+    }
+
+    #[test]
+    fn no_model_pricing_or_one_that_changes_nothing_is_list_price() {
+        assert_eq!(managed(r#"{"permissions":{}}"#), None);
+        assert_eq!(managed(r#"{"modelPricing":{"multiplier":1}}"#), None);
+        assert_eq!(managed(r#"{"modelPricing":{"overrides":{}}}"#), None);
+        assert_eq!(managed("not json"), None);
+        assert!(managed(r#"{"modelPricing":{"multiplier":0.85}}"#).is_some());
+        assert_eq!(ManagedPricing::load(Path::new("/nonexistent/managed-settings.json")), None);
+        let list = GaugePrices { table: PriceTable::seed(), managed: None };
+        assert_eq!(list.source(), RateSource::List);
+        let conf = GaugePrices { table: PriceTable::seed(), managed: managed(r#"{"modelPricing":{"multiplier":0.85}}"#) };
+        assert_eq!(conf.source(), RateSource::Configured);
+    }
 
     #[test]
     fn opus_input_output_cost() {

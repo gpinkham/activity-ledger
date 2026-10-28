@@ -6,6 +6,7 @@ import { getActivity, getLabelProgress, getPriceTable, getSettings, getTriggers,
 import { foundHint, showTriggers, workOnly, workShare } from "../lib/harness";
 import { useFilters } from "../state/filters";
 import { ChartCard } from "../components/ChartCard";
+import { BudgetCard } from "../components/BudgetCard";
 import { KpiRow } from "../components/KpiRow";
 import { InfoTip } from "../components/InfoTip";
 import { useChartTokens } from "../lib/chart-theme";
@@ -237,6 +238,7 @@ export default function Activity() {
         <HarnessCard />
         <SettingsCard />
         <PricingCard />
+        <BudgetCard />
       </div>
     </div>
   );

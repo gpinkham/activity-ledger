@@ -1,0 +1,111 @@
+// Tests for the menu bar gauge's wording (src/lib/gauge.ts) and its panel
+// (src/screens/TrayPanel.tsx), rendered to HTML in each ring state. Run with
+// `npm run test:ui`. The TypeScript is compiled with the esbuild Vite already uses.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { buildSync } from "esbuild";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+
+// Inside node_modules so the bundles find the same React the test renders with.
+const cache = fileURLToPath(new URL("../node_modules/.cache/", import.meta.url));
+mkdirSync(cache, { recursive: true });
+const out = mkdtempSync(join(cache, "ci-ui-gauge-"));
+const build = (entry, name) => {
+  const outfile = join(out, name);
+  buildSync({
+    entryPoints: [fileURLToPath(new URL(entry, import.meta.url))],
+    bundle: true, format: "esm", platform: "node", jsx: "automatic", outfile,
+    external: ["react", "react-dom", "react/jsx-runtime"], logLevel: "silent",
+  });
+  return outfile;
+};
+const G = await import(build("../src/lib/gauge.ts", "gauge.mjs"));
+const { TrayPanel } = await import(build("../src/screens/TrayPanel.tsx", "TrayPanel.mjs"));
+rmSync(out, { recursive: true, force: true });
+
+const budget = (over = {}) => ({
+  monthly_budget: 300, days_in_month: 31, days_elapsed: 15, days_left: 17,
+  daily_allowance: 300 / 31, today: 4.1, today_share: 4.1 / (300 / 31), month_to_date: 150,
+  on_pace: (300 / 31) * 15, projected: 310, remaining_per_day: 150 / 17, ring: "green", ...over,
+});
+const view = (b, rate_source = "list") => ({ day: "2026-10-15", budget: b, rate_source });
+const html = (props) => renderToStaticMarkup(createElement(TrayPanel, { onOpen: () => {}, error: null, ...props }));
+
+test("the note says what the figures are, by where the rates came from", () => {
+  assert.equal(G.rateNote("list"), "Estimate at list price, this Mac only, Claude Code only.");
+  assert.equal(G.rateNote("configured"), "Estimate at configured rates, this Mac only, Claude Code only.");
+});
+
+test("pace, remaining and split wording", () => {
+  assert.equal(G.paceLine(budget({ month_to_date: 150, on_pace: 145.16 })), "$4.84 ahead of an even pace");
+  assert.equal(G.paceLine(budget({ month_to_date: 140, on_pace: 145.16 })), "$5.16 under an even pace");
+  assert.equal(G.paceLine(budget({ month_to_date: 145.16, on_pace: 145.16 })), "On an even pace");
+  assert.equal(G.remainingLine(budget({ remaining_per_day: 8.82, days_left: 17 })), "$8.82 for each of the 17 days left");
+  assert.equal(G.remainingLine(budget({ remaining_per_day: 20, days_left: 1 })), "$20.00 for today");
+  assert.deepEqual(G.splitShares(3, 1), { work: 75, overhead: 25 });
+  assert.equal(G.splitShares(0, 0), null);
+});
+
+test("the budget form refuses what the gauge cannot use", () => {
+  assert.equal(G.checkBudget(300, 80, 100), null);
+  assert.equal(G.checkBudget(0, 80, 100), null, "0 is no budget");
+  assert.match(G.checkBudget(-1, 80, 100), /dollars/);
+  assert.match(G.checkBudget(NaN, 80, 100), /dollars/);
+  assert.match(G.checkBudget(300, 100, 100), /below red/);
+  assert.match(G.checkBudget(300, 0, 100), /above 0/);
+});
+
+test("each ring state renders its colour, its words and the estimate note", () => {
+  const cases = [
+    ["green", 0.42, "text-emerald-500", "Within today&#x27;s allowance (42%)"],
+    ["amber", 0.85, "text-amber-500", "Near today&#x27;s allowance (85%)"],
+    ["red", 1.3, "text-red-500", "Over today&#x27;s allowance (130%)"],
+  ];
+  for (const [ring, share, cls, words] of cases) {
+    const h = html({ view: view(budget({ ring, today_share: share })), split: { work_usd: 3, overhead_usd: 1 } });
+    assert.match(h, new RegExp(`data-state="${ring}"`));
+    assert.match(h, new RegExp(`class="text-xs ${cls}" data-ring="${ring}"`), ring);
+    assert.ok(h.includes(words), `${ring}: ${words}`);
+    assert.ok(h.includes("$4.10") && h.includes("of $9.68"), "today of the allowance");
+    assert.ok(h.includes("$150.00 of $300.00"), "month to date of the budget");
+    assert.ok(h.includes("75% / 25%"), "work and overhead");
+    assert.ok(h.includes("Estimate at list price, this Mac only, Claude Code only."), "the estimate note");
+    assert.ok(h.includes("Open Activity Ledger"));
+  }
+});
+
+test("over budget the projection shows red and nothing is left per day", () => {
+  const h = html({ view: view(budget({ ring: "red", projected: 420, remaining_per_day: 0 })), split: null });
+  assert.match(h, /tabular-nums text-red-500">\$420\.00/);
+  assert.ok(h.includes("$0.00 for each of the 17 days left"));
+  assert.ok(h.includes("working it out"), "the split is still loading");
+});
+
+test("with no budget the panel shows the spend, no ring colour, and where to set one", () => {
+  const b = budget({ ring: "none", monthly_budget: 0, daily_allowance: 0, today_share: 0, remaining_per_day: 0 });
+  const h = html({ view: view(b, "configured"), split: { work_usd: 0, overhead_usd: 0 } });
+  assert.match(h, /data-ring="none"/);
+  assert.ok(h.includes("No budget set"));
+  assert.ok(!h.includes(" of $0.00"), "no allowance to show");
+  assert.ok(!h.includes("Pace"), "no pace without a budget");
+  assert.ok(h.includes("Set a monthly budget"));
+  assert.ok(h.includes("no calls yet"));
+  assert.ok(h.includes("Estimate at configured rates, this Mac only, Claude Code only."));
+});
+
+test("before the first figures arrive, and on an error", () => {
+  assert.match(html({ view: null, split: null }), /Reading this month/);
+  assert.match(html({ view: null, split: null, error: "no transcripts" }), /no transcripts/);
+});
+
+test("no en or em dashes in what the panel or the budget card say", async () => {
+  const { readFileSync } = await import("node:fs");
+  for (const f of ["../src/screens/TrayPanel.tsx", "../src/lib/gauge.ts", "../src/components/BudgetCard.tsx", "../src/screens/TrayApp.tsx"]) {
+    const text = readFileSync(new URL(f, import.meta.url), "utf8");
+    assert.ok(!/[\u2013\u2014]/.test(text), f);
+  }
+});

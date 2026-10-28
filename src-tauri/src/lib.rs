@@ -1,6 +1,8 @@
 pub mod commands;
 pub mod activity;
+pub mod budget;
 pub mod exporter;
+pub mod gauge;
 pub mod labeller;
 pub mod metrics;
 pub mod models;
@@ -11,6 +13,7 @@ pub mod scanner;
 pub mod settings;
 pub mod sessions;
 pub mod store;
+pub mod tray;
 pub mod triggers;
 
 use commands::AppState;
@@ -49,8 +52,21 @@ pub fn run() {
                 triggers_path,
                 triggers_error: Mutex::new(triggers_error),
                 home: Some(home),
+                gauge: Mutex::new(gauge::Tally::new()),
+                managed_settings: std::path::PathBuf::from(pricing::MANAGED_SETTINGS_PATH),
             });
+            let handle = app.handle().clone();
+            tray::sync(&handle)?;
+            tray::start_poll(handle);
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            use tauri::Manager;
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    tray::on_main_close(window.app_handle(), api);
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::refresh,
@@ -74,6 +90,9 @@ pub fn run() {
             commands::set_price_table,
             commands::export_bundle,
             commands::save_export,
+            commands::get_gauge,
+            commands::get_gauge_split,
+            commands::open_main_window,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
