@@ -1,4 +1,5 @@
-use crate::metrics::{bind, where_clause, Filters};
+use crate::gauge::{Clock, SystemClock};
+use crate::metrics::{bind, local_days, where_clause, Filters};
 use crate::pricing::{without_long, PriceTable, TokenBreakdown};
 use crate::store::Store;
 use serde::Serialize;
@@ -85,7 +86,11 @@ struct Acc {
 
 impl Store {
     pub fn get_sessions(&self, price: &PriceTable, f: &Filters) -> rusqlite::Result<Vec<SessionSummary>> {
-        let (w, binds) = where_clause(f);
+        self.get_sessions_with(price, f, &SystemClock)
+    }
+
+    pub fn get_sessions_with(&self, price: &PriceTable, f: &Filters, clock: &dyn Clock) -> rusqlite::Result<Vec<SessionSummary>> {
+        let (w, binds) = where_clause(&local_days(f, clock));
 
         // Per (session, model) aggregate over messages.
         let msql = format!(

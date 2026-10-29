@@ -6,7 +6,8 @@
 //! segment gets one label from fixed rules over its prompt kind and its tool mix.
 //! Costs are summed per label. Only labels, counts and costs leave this module.
 
-use crate::metrics::{bind, where_clause, Filters};
+use crate::gauge::{Clock, SystemClock};
+use crate::metrics::{bind, local_days, where_clause, Filters};
 use crate::pricing::{without_long, PriceTable, TokenBreakdown};
 use crate::settings::AppSettings;
 use crate::store::Store;
@@ -343,7 +344,12 @@ impl Store {
     /// Cut the filtered calls into segments, with each segment's calls and tool mix.
     /// Also returns the model ids the price table does not know.
     pub(crate) fn build_segments(&self, price: &PriceTable, f: &Filters) -> rusqlite::Result<(BTreeMap<(String, i64), Segment>, Vec<String>)> {
-        let (w, binds) = where_clause(f);
+        self.build_segments_with(price, f, &SystemClock)
+    }
+
+    /// `build_segments` for the local days of `clock`.
+    pub(crate) fn build_segments_with(&self, price: &PriceTable, f: &Filters, clock: &dyn Clock) -> rusqlite::Result<(BTreeMap<(String, i64), Segment>, Vec<String>)> {
+        let (w, binds) = where_clause(&local_days(f, clock));
         // Prompts are read without the date filter so a call just inside the range
         // still finds the prompt that started it.
         let undated = Filters { project: f.project.clone(), ..Default::default() };
@@ -396,7 +402,10 @@ impl Store {
                     calls: Vec::new(),
                     tools: ToolMix::default(),
                     trigger,
-                    day: ts.get(..10).unwrap_or("").to_string(),
+                    // The local day it starts on; a timestamp that does not parse keeps its UTC date.
+                    day: chrono::DateTime::parse_from_rfc3339(ts)
+                        .map(|t| clock.date_of(t.to_utc()).format("%Y-%m-%d").to_string())
+                        .unwrap_or_else(|_| ts.get(..10).unwrap_or("").to_string()),
                     start,
                 }
             });
@@ -504,7 +513,12 @@ impl Store {
 
     /// The report grouped by the rule labels or by the local model's labels.
     pub fn activity_by(&self, price: &PriceTable, f: &Filters, settings: &AppSettings, source: LabelSource) -> rusqlite::Result<ActivityReport> {
-        let (segments, mut unknown) = self.build_segments(price, f)?;
+        self.activity_by_with(price, f, settings, source, &SystemClock)
+    }
+
+    /// `activity_by` for the local days of `clock`.
+    pub fn activity_by_with(&self, price: &PriceTable, f: &Filters, settings: &AppSettings, source: LabelSource, clock: &dyn Clock) -> rusqlite::Result<ActivityReport> {
+        let (segments, mut unknown) = self.build_segments_with(price, f, clock)?;
         // The local model's labels for these segments, when the pass has run.
         let model = settings.ollama_model.trim().to_string();
         let model_labels = if model.is_empty() { HashMap::new() } else { self.model_labels(&settings.ollama_model)? };
@@ -777,8 +791,22 @@ mod tests {
         store
     }
 
+    /// UTC days, so a test's days do not depend on the zone of the Mac running it.
+    struct UtcClock;
+    impl Clock for UtcClock {
+        fn today(&self) -> chrono::NaiveDate {
+            chrono::NaiveDate::from_ymd_opt(2026, 10, 2).unwrap()
+        }
+        fn date_of(&self, t: chrono::DateTime<chrono::Utc>) -> chrono::NaiveDate {
+            t.date_naive()
+        }
+        fn start_of(&self, d: chrono::NaiveDate) -> chrono::DateTime<chrono::Utc> {
+            d.and_hms_opt(0, 0, 0).unwrap().and_utc()
+        }
+    }
+
     fn report(settings: &AppSettings) -> ActivityReport {
-        fixture().activity(&PriceTable::seed(), &Filters::default(), settings).unwrap()
+        fixture().activity_by_with(&PriceTable::seed(), &Filters::default(), settings, LabelSource::Rule, &UtcClock).unwrap()
     }
     fn row<'a>(r: &'a ActivityReport, label: &str) -> &'a ActivityRow {
         r.rows.iter().find(|x| x.activity == label).unwrap_or_else(|| panic!("no row {label}: {:?}", r.rows.iter().map(|x| &x.activity).collect::<Vec<_>>()))
@@ -901,7 +929,7 @@ mod tests {
     #[test]
     fn date_filter_keeps_the_prompt_that_started_a_call() {
         let f = Filters { from: Some("2026-10-02".into()), ..Default::default() };
-        let r = fixture().activity(&PriceTable::seed(), &f, &AppSettings::default()).unwrap();
+        let r = fixture().activity_by_with(&PriceTable::seed(), &f, &AppSettings::default(), LabelSource::Rule, &UtcClock).unwrap();
         assert!(r.rows.iter().all(|x| x.activity != "debugging" && x.activity != "compaction"));
         assert!((row(&r, "research").cost_usd - usd(7000) - usd(21000)).abs() < 1e-9);
     }

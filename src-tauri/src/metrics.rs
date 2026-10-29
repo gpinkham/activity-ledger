@@ -205,7 +205,11 @@ impl Store {
     }
 
     pub fn by_tool(&self, f: &Filters) -> rusqlite::Result<Vec<ByTool>> {
-        let (w, binds) = where_clause(f);
+        self.by_tool_with(f, &SystemClock)
+    }
+
+    pub fn by_tool_with(&self, f: &Filters, clock: &dyn Clock) -> rusqlite::Result<Vec<ByTool>> {
+        let (w, binds) = where_clause(&local_days(f, clock));
         let sql = format!("SELECT name, COUNT(*), MAX(is_mcp) FROM tool_calls {w} GROUP BY name ORDER BY 2 DESC");
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(bind(&binds).as_slice(), |r| {
@@ -339,7 +343,13 @@ impl Store {
     }
 
     pub fn workflow(&self, f: &Filters) -> rusqlite::Result<Workflow> {
-        let (w, binds) = where_clause(f);
+        self.workflow_with(f, &SystemClock)
+    }
+
+    /// `workflow` for the local days of `clock`. The heatmap's hours and the model
+    /// mix's days are still read in UTC.
+    pub fn workflow_with(&self, f: &Filters, clock: &dyn Clock) -> rusqlite::Result<Workflow> {
+        let (w, binds) = where_clause(&local_days(f, clock));
         let tsql = format!(
             "SELECT
                COALESCE(SUM(CASE WHEN name='Bash' THEN 1 ELSE 0 END), 0),
@@ -508,15 +518,16 @@ mod tests {
     }
 
     /// Three Opus calls of 1,000 input tokens: 03:30 UTC on Oct 2 (the evening of
-    /// Oct 1 four hours west), 23:30 UTC on Oct 2 with 2 web searches, and noon UTC on
-    /// Oct 3. Projects p and q.
+    /// Oct 1 four hours west) with a Bash call, 23:30 UTC on Oct 2 with 2 web
+    /// searches, and noon UTC on Oct 3. Projects p and q.
     fn local_day_store() -> Store {
         let mut store = Store::open_in_memory();
-        let line = |id: &str, sid: &str, ts: &str, web: i64| format!(
-            r#"{{"type":"assistant","sessionId":"{sid}","timestamp":"{ts}","message":{{"id":"{id}","role":"assistant","model":"claude-opus-5-5","usage":{{"input_tokens":1000,"server_tool_use":{{"web_search_requests":{web}}}}}}}}}"#) + "\n";
+        let line = |id: &str, sid: &str, ts: &str, web: i64, content: &str| format!(
+            r#"{{"type":"assistant","sessionId":"{sid}","timestamp":"{ts}","message":{{"id":"{id}","role":"assistant","model":"claude-opus-5-5","usage":{{"input_tokens":1000,"server_tool_use":{{"web_search_requests":{web}}}}},"content":[{content}]}}}}"#) + "\n";
+        let bash = r#"{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}"#;
         for (project, content) in [
-            ("p", line("a", "s1", "2026-10-02T03:30:00.000Z", 0) + &line("b", "s1", "2026-10-02T23:30:00.000Z", 2)),
-            ("q", line("c", "s2", "2026-10-03T12:00:00.000Z", 0)),
+            ("p", line("a", "s1", "2026-10-02T03:30:00.000Z", 0, bash) + &line("b", "s1", "2026-10-02T23:30:00.000Z", 2, "")),
+            ("q", line("c", "s2", "2026-10-03T12:00:00.000Z", 0, "")),
         ] {
             let sf = ScannedFile { path: format!("/x/{project}/s.jsonl").into(), project: project.into(), size: 1, mtime: 1, subagent: None };
             store.replace_file(&sf, &parse_str(project, &content)).unwrap();
@@ -573,5 +584,35 @@ mod tests {
         let projects = store.by_project_with(&p, &f, &West).unwrap();
         let pp = projects.iter().find(|r| r.project == "p").unwrap();
         assert!((pp.cost_usd - (2.0 * call + web)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn sessions_tools_workflow_and_activity_read_the_same_local_days() {
+        use crate::activity::LabelSource;
+        use crate::settings::AppSettings;
+        let store = local_day_store();
+        let p = PriceTable::seed();
+        let one = |d: &str| Filters { from: Some(d.into()), to: Some(d.into()), ..Default::default() };
+        let sessions = |f: &Filters| -> Vec<String> {
+            store.get_sessions_with(&p, f, &West).unwrap().into_iter().map(|s| s.session_id).collect()
+        };
+        // Oct 1 there holds call a and its Bash call, all on the UTC date Oct 2.
+        let oct1 = one("2026-10-01");
+        assert_eq!(sessions(&oct1), vec!["s1"]);
+        assert_eq!(store.by_tool_with(&oct1, &West).unwrap().iter().map(|t| (t.tool.as_str(), t.count)).collect::<Vec<_>>(), vec![("Bash", 1)]);
+        assert_eq!(store.workflow_with(&oct1, &West).unwrap().bash, 1);
+        let chart: f64 = store.by_day_with(&p, &oct1, &West).unwrap().iter().map(|d| d.cost_usd).sum();
+        let a = store.activity_by_with(&p, &oct1, &AppSettings::default(), LabelSource::Rule, &West).unwrap();
+        assert!((a.totals.cost_usd - chart).abs() < 1e-9, "activity {} vs chart {chart}", a.totals.cost_usd);
+        assert!(a.by_day.iter().all(|d| d.day == "2026-10-01"), "{:?}", a.by_day);
+        // Oct 2 there is call b alone: no tools.
+        let oct2 = one("2026-10-02");
+        assert_eq!(sessions(&oct2), vec!["s1"]);
+        assert!(store.by_tool_with(&oct2, &West).unwrap().is_empty());
+        assert_eq!(store.workflow_with(&oct2, &West).unwrap().bash, 0);
+        assert_eq!(sessions(&one("2026-10-03")), vec!["s2"]);
+        let all = store.activity_by_with(&p, &Filters::default(), &AppSettings::default(), LabelSource::Rule, &West).unwrap();
+        let total: f64 = store.by_day_with(&p, &Filters::default(), &West).unwrap().iter().map(|d| d.cost_usd).sum();
+        assert!((all.totals.cost_usd - total).abs() < 1e-9);
     }
 }
