@@ -9,6 +9,8 @@ export interface TrayPanelProps {
   split: WorkSplit | null;
   error?: string | null;
   onOpen: () => void;
+  /** Opens the main window's weekly report save flow. The panel writes nothing. */
+  onSaveReport?: () => void;
 }
 
 function Row({ label, value, className = "" }: { label: string; value: string; className?: string }) {
@@ -20,7 +22,7 @@ function Row({ label, value, className = "" }: { label: string; value: string; c
   );
 }
 
-export function TrayPanel({ view, split, error, onOpen }: TrayPanelProps) {
+export function TrayPanel({ view, split, error, onOpen, onSaveReport }: TrayPanelProps) {
   if (!view) {
     return (
       <div className="p-4 text-sm text-muted" data-state="loading">
@@ -63,6 +65,12 @@ export function TrayPanel({ view, split, error, onOpen }: TrayPanelProps) {
         className="mt-1 px-3 py-1 rounded-md border border-line text-ink hover:bg-elevated">
         Open Activity Ledger
       </button>
+      {onSaveReport && (
+        <button onClick={onSaveReport} data-save-report
+          className="px-3 py-1 rounded-md border border-line text-ink hover:bg-elevated">
+          Save weekly report
+        </button>
+      )}
     </div>
   );
 }

@@ -346,6 +346,26 @@ pub fn export_bundle(state: tauri::State<AppState>, filters: Filters) -> Result<
     serde_json::to_string_pretty(&bundle).map_err(|e| e.to_string())
 }
 
+/// The weekly report for the local week starting on `week_start` (a Monday,
+/// `YYYY-MM-DD`), as Markdown. The front end saves it through `save_export`.
+#[tauri::command]
+pub fn weekly_report(state: tauri::State<AppState>, week_start: String, hide_projects: bool) -> Result<String, String> {
+    let monday = crate::report::parse_week_start(&week_start)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    let price = state.price.lock().map_err(|e| e.to_string())?;
+    let written = chrono::Local::now().format("%-d %b %Y at %H:%M").to_string();
+    crate::report::build_report(&store, &price, &SystemClock, monday, hide_projects, &written).map_err(|e| e.to_string())
+}
+
+/// The tray's "Save weekly report": bring up the main window and ask it to start
+/// its save flow. The tray itself writes nothing.
+#[tauri::command]
+pub fn open_weekly_report(app: tauri::AppHandle) {
+    use tauri::Emitter;
+    crate::tray::show_main(&app);
+    let _ = app.emit_to("main", "start-weekly-report", ());
+}
+
 #[tauri::command]
 pub fn save_export(path: String, contents: String) -> Result<(), String> {
     std::fs::write(&path, contents).map_err(|e| e.to_string())

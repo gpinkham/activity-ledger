@@ -13,6 +13,7 @@ import Projects from "./screens/Projects";
 import Sessions from "./screens/Sessions";
 import SessionDetail from "./screens/SessionDetail";
 import { ExportButton } from "./components/ExportButton";
+import { WeeklyReportButton } from "./components/WeeklyReportButton";
 
 const TABS: { id: import("./state/nav").Screen; label: string }[] = [
   { id: "overview", label: "Overview" },
@@ -90,6 +91,7 @@ export default function App() {
             ))}
           </select>
           <ExportButton />
+          <WeeklyReportButton />
           <button
             onClick={() => refreshMut.mutate()}
             disabled={refreshMut.isPending}

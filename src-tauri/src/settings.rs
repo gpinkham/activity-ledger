@@ -27,6 +27,9 @@ pub struct AppSettings {
     pub red_pct: f64,
     /// Show the budget gauge in the menu bar. Off by default.
     pub show_in_menu_bar: bool,
+    /// Letter the projects in a saved weekly report ("Project A") instead of naming
+    /// them. Off by default.
+    pub report_hide_projects: bool,
 }
 
 impl Default for AppSettings {
@@ -42,6 +45,7 @@ impl Default for AppSettings {
             amber_pct: 80.0,
             red_pct: 100.0,
             show_in_menu_bar: false,
+            report_hide_projects: false,
         }
     }
 }
@@ -80,6 +84,13 @@ mod tests {
         let old = AppSettings::load_or_default(&path);
         assert!(!old.show_in_menu_bar);
         assert_eq!((old.monthly_budget_usd, old.amber_pct, old.red_pct), (0.0, 80.0, 100.0));
+
+        assert!(!old.report_hide_projects, "a file from before 0.3 names projects in the report");
+
+        // The report's hide setting is kept.
+        let hide = AppSettings { report_hide_projects: true, ..AppSettings::default() };
+        hide.save(&path).unwrap();
+        assert!(AppSettings::load_or_default(&path).report_hide_projects);
 
         // A file saved by an older build with a field this one no longer has still loads.
         std::fs::write(&path, r#"{"ollama_model":"qwen3:32b","retired_field":"x"}"#).unwrap();

@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { panelPoller } from "../lib/gauge";
-import { getGauge, getGaugeSplit, openMainWindow } from "../lib/ipc";
+import { getGauge, getGaugeSplit, openMainWindow, openWeeklyReport } from "../lib/ipc";
 import type { GaugeView, WorkSplit } from "../lib/types";
 import { TrayPanel } from "./TrayPanel";
 
@@ -37,5 +37,5 @@ export default function TrayApp() {
     };
   }, [load]);
 
-  return <TrayPanel view={view} split={split} error={error} onOpen={() => void openMainWindow()} />;
+  return <TrayPanel view={view} split={split} error={error} onOpen={() => void openMainWindow()} onSaveReport={() => void openWeeklyReport()} />;
 }

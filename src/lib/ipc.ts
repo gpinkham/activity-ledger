@@ -32,4 +32,7 @@ export const getTriggers = () => invoke<TriggerStatus>("get_triggers");
 export const getGauge = () => invoke<GaugeView>("get_gauge");
 export const getGaugeSplit = () => invoke<WorkSplit>("get_gauge_split");
 export const openMainWindow = () => invoke<void>("open_main_window");
+export const weeklyReport = (weekStart: string, hideProjects: boolean) =>
+  invoke<string>("weekly_report", { weekStart, hideProjects });
+export const openWeeklyReport = () => invoke<void>("open_weekly_report");
 export const setAdapterEnabled = (name: string, enabled: boolean) => invoke<TriggerStatus>("set_adapter_enabled", { name, enabled });

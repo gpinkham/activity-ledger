@@ -9,6 +9,7 @@ pub mod models;
 pub mod ollama;
 pub mod parser;
 pub mod pricing;
+pub mod report;
 pub mod scanner;
 pub mod settings;
 pub mod sessions;
@@ -93,6 +94,8 @@ pub fn run() {
             commands::get_gauge,
             commands::get_gauge_split,
             commands::open_main_window,
+            commands::weekly_report,
+            commands::open_weekly_report,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

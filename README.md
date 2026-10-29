@@ -28,6 +28,7 @@ In this run the overhead share is small: most wake-ups went on to do real work, 
 - **Cost and efficiency:** cost per model, cache hit rate, and the price table the estimates use. You can edit the prices.
 - **Cost by activity:** every session is cut into segments, one per prompt, and each segment gets a label. Cost, calls and tokens are totalled per label, per day, and split into work and overhead.
 - **Workflow, Projects, Sessions:** tool use, cost per project, and a drill down into each session.
+- **Weekly report:** one click saves a week (last week, or this week so far) as a Markdown file: totals against the week before, cost by day, model and project, and the five busiest sessions. It is written only when you ask, holds no prompt text, session titles or paths, and can letter projects ("Project A") instead of naming them. The tray's "Save weekly report" opens the same save in the main window.
 - **Export:** a JSON summary with hashed ids and no prompt text, saved to a file you choose.
 - **Menu bar budget** (optional, off by default): a ring in the menu bar for today's spend against a monthly budget, for anyone working to a company API budget. The budget is spread evenly over the calendar month, so a $300 budget in a 31 day month allows $9.68 a day; days start at local midnight. The ring is green below 80% of today's allowance, amber from 80% and red from 100% (both thresholds can be changed). A click opens today's spend, the month to date, the pace, the projected month end, what is left per day, and today's split between work and overhead. Set it up under Cost by activity, Menu bar budget. With it on, closing the main window keeps the app in the menu bar and out of the Dock.
 
@@ -110,6 +111,8 @@ The built app is under `src-tauri/target/.../bundle/macos/`. It is not signed or
 npm run test:ui
 npx tsc --noEmit
 ```
+
+At 0.3.0: 171 Rust tests and 30 front-end tests. The weekly report's expected output is checked in at `src-tauri/tests/fixtures/weekly-report.golden.md`; after a deliberate change, rewrite it with `UPDATE_GOLDEN=1 cargo test report::` and read the diff.
 
 ## License
 

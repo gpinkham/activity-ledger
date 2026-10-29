@@ -80,6 +80,8 @@ export interface AppSettings {
   model_labels_enabled: boolean; allow_remote_ollama: boolean;
   /** The menu bar gauge: monthly budget in USD (0 = not set), thresholds in percent. */
   monthly_budget_usd: number; amber_pct: number; red_pct: number; show_in_menu_bar: boolean;
+  /** The weekly report letters projects ("Project A") instead of naming them. */
+  report_hide_projects: boolean;
 }
 export type Ring = "none" | "green" | "amber" | "red";
 export interface BudgetView {
