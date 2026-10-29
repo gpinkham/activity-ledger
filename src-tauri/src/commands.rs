@@ -249,6 +249,23 @@ pub fn set_settings(app: tauri::AppHandle, state: tauri::State<AppState>, settin
     Ok(())
 }
 
+/// Change only the weekly report's hide setting. The report button must not write back
+/// a whole settings object: its copy can be older than a budget or Ollama change made
+/// elsewhere in the app, and a full write would undo it.
+pub fn set_report_hide(state: &AppState, hide: bool) -> Result<AppSettings, String> {
+    let mut settings = state.settings.lock().map_err(|e| e.to_string())?;
+    let mut next = settings.clone();
+    next.report_hide_projects = hide;
+    next.save(&state.settings_path).map_err(|e| e.to_string())?;
+    *settings = next.clone();
+    Ok(next)
+}
+
+#[tauri::command]
+pub fn set_report_hide_projects(state: tauri::State<AppState>, hide: bool) -> Result<AppSettings, String> {
+    set_report_hide(&state, hide)
+}
+
 /// What the menu bar panel shows, apart from the work and overhead split.
 #[derive(Debug, Serialize)]
 pub struct GaugeView {
@@ -412,6 +429,25 @@ mod tests {
             gauge: Mutex::new(Tally::new()),
             managed_settings,
         }
+    }
+
+    #[test]
+    fn the_report_hide_toggle_changes_that_setting_and_nothing_else() {
+        let dir = std::env::temp_dir().join(format!("ci_hide_cmd_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let state = state_for(&dir.join("projects"), &dir.join("data"), "");
+        // A budget set elsewhere in the app since the report button last read settings.
+        state.settings.lock().unwrap().show_in_menu_bar = true;
+        let after = set_report_hide(&state, true).unwrap();
+        assert!(after.report_hide_projects);
+        assert_eq!((after.monthly_budget_usd, after.show_in_menu_bar), (310.0, true));
+        let saved = AppSettings::load_or_default(&state.settings_path);
+        assert_eq!(saved, after, "the file holds the same settings");
+        assert_eq!(*state.settings.lock().unwrap(), after);
+        let off = set_report_hide(&state, false).unwrap();
+        assert!(!off.report_hide_projects);
+        assert_eq!(off.monthly_budget_usd, 310.0);
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

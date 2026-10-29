@@ -13,7 +13,7 @@ Monday 26 Oct 2026 to Sunday 1 Nov 2026, local time. Written 3 Nov 2026 at 09:15
 | Output tokens | 235,000 | 1,000 | +23400% |
 | Cache read tokens | 6,000,000 | 100,000 | +5900% |
 | Cache write tokens | 0 | 0 | 0% |
-| Web searches | 3 | 0 | new |
+| Web searches (not priced) | 3 | 0 | new |
 
 ## By day
 
@@ -34,7 +34,7 @@ Monday 26 Oct 2026 to Sunday 1 Nov 2026, local time. Written 3 Nov 2026 at 09:15
 | claude-opus-5-5 | $21.50 | 58% | 9 |
 | claude-sonnet-4-6 | $13.46 | 37% | 8 |
 | claude-haiku-5-5 | $1.87 | 5% | 8 |
-| unknown | $0.00 | 0% | 13 |
+| No model (your prompts) | $0.00 | 0% | 13 |
 
 ## By project
 

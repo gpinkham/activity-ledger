@@ -1,28 +1,28 @@
 import { useEffect, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { save } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import { getSettings, saveExport, setSettings, weeklyReport } from "../lib/ipc";
-import { REPORT_WEEK_LABELS, hideProjectsOf, reportFileName, weekStart, withHideProjects, type ReportWeek } from "../lib/report";
+import { getSettings, saveExport, setReportHideProjects, weeklyReport } from "../lib/ipc";
+import { REPORT_WEEK_LABELS, hideProjectsOf, reportFileName, weekStart, type ReportWeek } from "../lib/report";
 import type { AppSettings } from "../lib/types";
 
 /** Saves a week's Markdown report where the user picks. Written only when asked. */
 export function WeeklyReportButton() {
+  const qc = useQueryClient();
+  // The same settings query the other cards read, so a hide change shows everywhere and
+  // a card that saves afterwards sends it back unchanged.
+  const settings = useQuery({ queryKey: ["settings"], queryFn: getSettings });
   const [week, setWeek] = useState<ReportWeek>("last");
-  const [settings, setLocalSettings] = useState<AppSettings | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const hide = hideProjectsOf(settings);
+  const loaded = settings.data !== undefined;
+  const hide = hideProjectsOf(settings.data);
 
-  useEffect(() => {
-    getSettings().then(setLocalSettings).catch(() => {});
-  }, []);
-
+  // Only this one field is written, so a stale copy cannot undo a budget or model change.
   const onHide = async (next: boolean) => {
-    if (!settings) return;
-    const updated = withHideProjects(settings, next);
-    setLocalSettings(updated);
     try {
-      await setSettings(updated);
+      const saved = await setReportHideProjects(next);
+      qc.setQueryData<AppSettings>(["settings"], saved);
     } catch (e) {
       setError(String(e));
     }
@@ -32,8 +32,11 @@ export function WeeklyReportButton() {
     setBusy(true);
     setError(null);
     try {
+      // Read the hide setting fresh, so a report never names projects because settings
+      // had not loaded yet (the tray can ask before they have).
+      const current = await qc.fetchQuery({ queryKey: ["settings"], queryFn: getSettings });
       const monday = weekStart(which, new Date());
-      const md = await weeklyReport(monday, hide);
+      const md = await weeklyReport(monday, hideProjectsOf(current));
       const path = await save({
         defaultPath: reportFileName(monday),
         filters: [{ name: "Markdown", extensions: ["md"] }],
@@ -69,10 +72,10 @@ export function WeeklyReportButton() {
         ))}
       </select>
       <label className="flex items-center gap-1 text-xs text-muted">
-        <input type="checkbox" checked={hide} disabled={!settings} onChange={(e) => void onHide(e.target.checked)} />
+        <input type="checkbox" checked={hide} disabled={!loaded} onChange={(e) => void onHide(e.target.checked)} />
         Hide project names
       </label>
-      <button onClick={() => void run(week)} disabled={busy} className="px-3 py-1 rounded border border-neutral-300 dark:border-neutral-700 disabled:opacity-50">
+      <button onClick={() => void run(week)} disabled={busy || !loaded} className="px-3 py-1 rounded border border-neutral-300 dark:border-neutral-700 disabled:opacity-50">
         {busy ? "Saving…" : "Weekly report"}
       </button>
       {error && <span className="text-xs text-red-600">{error}</span>}

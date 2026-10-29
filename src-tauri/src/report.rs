@@ -183,7 +183,8 @@ pub fn build_report(
         ("Output tokens", t.output_tokens, b.output_tokens),
         ("Cache read tokens", t.cache_read, b.cache_read),
         ("Cache write tokens", t.cache_creation, b.cache_creation),
-        ("Web searches", now.web_searches, before.web_searches),
+        // Counted, not priced, as everywhere else in the app outside Cost by activity.
+        ("Web searches (not priced)", now.web_searches, before.web_searches),
     ] {
         let _ = writeln!(md, "| {label} | {} | {} | {} |", count(n), count(p), change(n as f64, p as f64));
     }
@@ -214,7 +215,9 @@ pub fn build_report(
         let _ = writeln!(md, "| Model | Cost | Share | Messages |");
         let _ = writeln!(md, "|---|---:|---:|---:|");
         for m in &models {
-            let _ = writeln!(md, "| {} | {} | {} | {} |", cell(&m.model), usd(m.cost_usd), share(m.cost_usd, t.est_cost_usd), count(m.messages));
+            // Prompt rows carry no model; the main window lists them as "unknown".
+            let label = if m.model == "unknown" { "No model (your prompts)".to_string() } else { cell(&m.model) };
+            let _ = writeln!(md, "| {label} | {} | {} | {} |", usd(m.cost_usd), share(m.cost_usd, t.est_cost_usd), count(m.messages));
         }
     }
 

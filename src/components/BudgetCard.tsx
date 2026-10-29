@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChartCard } from "./ChartCard";
 import { getSettings, setSettings } from "../lib/ipc";
 import { cardDraft, checkBudget } from "../lib/gauge";
+import { BUDGET_FIELDS, withOwnFields } from "../lib/settings";
 import type { AppSettings } from "../lib/types";
 
 const field = "border border-line rounded-md px-2 py-1 bg-surface text-ink w-full";
@@ -16,7 +17,7 @@ export function BudgetCard() {
   // app) do not overwrite it.
   const [edits, setEdits] = useState<AppSettings | null>(null);
   const saveMut = useMutation({
-    mutationFn: setSettings,
+    mutationFn: (next: AppSettings) => setSettings(next),
     onSuccess: (_, next) => {
       qc.setQueryData(["settings"], next);
       setEdits(null);
@@ -55,7 +56,7 @@ export function BudgetCard() {
         <p>With the menu bar on, closing this window keeps Activity Ledger in the menu bar, out of the Dock. Click the ring for today&apos;s figures; its menu reopens this window or quits.</p>
         <p>Rates come from Claude Code&apos;s managed <code>modelPricing</code> setting when this Mac has one, otherwise from the price table. Nothing is sent anywhere.</p>
       </div>
-      <button onClick={() => saveMut.mutate(draft)} disabled={saveMut.isPending || problem !== null}
+      <button onClick={() => saveMut.mutate(withOwnFields(qc.getQueryData<AppSettings>(["settings"]), draft, BUDGET_FIELDS))} disabled={saveMut.isPending || problem !== null}
         className="mt-3 px-3 py-1 rounded-md text-white shadow-glow disabled:opacity-50"
         style={{ background: "linear-gradient(135deg, var(--c1), var(--c3))" }}>
         {saveMut.isPending ? "Saving…" : "Save"}

@@ -44,8 +44,3 @@ export function reportFileName(monday: string): string {
 export function hideProjectsOf(settings: Partial<AppSettings> | null | undefined): boolean {
   return settings?.report_hide_projects === true;
 }
-
-/** Settings with the hide choice changed and everything else kept. */
-export function withHideProjects(settings: AppSettings, hide: boolean): AppSettings {
-  return { ...settings, report_hide_projects: hide };
-}

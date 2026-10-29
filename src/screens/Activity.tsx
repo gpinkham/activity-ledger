@@ -12,6 +12,7 @@ import { InfoTip } from "../components/InfoTip";
 import { useChartTokens } from "../lib/chart-theme";
 import { usd, compact, pct } from "../lib/format";
 import type { ActivityRow, AppSettings, FastMode, LabelProgress, PriceTable } from "../lib/types";
+import { LOCAL_MODEL_FIELDS, withOwnFields } from "../lib/settings";
 import {
   coverageText, effectiveSource, groupByDay, hasModelLabels, readSavedSource, saveSource, shareOfLabelled,
   type LabelSource,
@@ -314,7 +315,10 @@ function SettingsCard() {
   const settings = useQuery({ queryKey: ["settings"], queryFn: getSettings });
   const [draft, setDraft] = useState<AppSettings | null>(null);
   useEffect(() => { if (settings.data) setDraft(settings.data); }, [settings.data]);
-  const saveMut = useMutation({ mutationFn: setSettings, onSuccess: () => qc.invalidateQueries() });
+  const saveMut = useMutation({
+    mutationFn: (d: AppSettings) => setSettings(withOwnFields(qc.getQueryData<AppSettings>(["settings"]), d, LOCAL_MODEL_FIELDS)),
+    onSuccess: () => qc.invalidateQueries(),
+  });
   if (!draft) return null;
   const set = <K extends keyof AppSettings>(k: K, v: AppSettings[K]) => setDraft({ ...draft, [k]: v });
 

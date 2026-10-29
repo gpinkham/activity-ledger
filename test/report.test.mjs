@@ -23,7 +23,6 @@ const build = (entry, name) => {
 };
 const R = await import(build("../src/lib/report.ts", "report.mjs"));
 const { TrayPanel } = await import(build("../src/screens/TrayPanel.tsx", "TrayPanel-report.mjs"));
-rmSync(out, { recursive: true, force: true });
 
 test("the default file name is the ISO week of the Monday", () => {
   assert.equal(R.reportFileName("2026-10-26"), "activity-ledger-2026-W44.md");
@@ -47,20 +46,39 @@ test("last week and this week start on local Mondays", () => {
   assert.equal(R.REPORT_WEEK_LABELS.this, "This week so far");
 });
 
-test("the hide setting round-trips and is off for an older settings file", () => {
-  const base = { ollama_url: "loopback", ollama_model: "m", local_context_limit: 1,
-    local_output_limit: 1, model_labels_enabled: false, allow_remote_ollama: false,
-    monthly_budget_usd: 300, amber_pct: 80, red_pct: 100, show_in_menu_bar: true, report_hide_projects: false };
-  assert.equal(R.hideProjectsOf(base), false);
-  const on = R.withHideProjects(base, true);
-  assert.equal(R.hideProjectsOf(on), true);
-  assert.deepEqual({ ...on, report_hide_projects: false }, base, "nothing else changes");
-  assert.equal(R.hideProjectsOf(JSON.parse(JSON.stringify(on))), true, "survives a save and load");
-  assert.equal(R.hideProjectsOf(R.withHideProjects(on, false)), false);
-  const { report_hide_projects, ...older } = base;
-  assert.equal(R.hideProjectsOf(older), false);
+test("the hide setting reads off for an older settings file or none", () => {
+  assert.equal(R.hideProjectsOf({ report_hide_projects: true }), true);
+  assert.equal(R.hideProjectsOf({ report_hide_projects: false }), false);
+  assert.equal(R.hideProjectsOf({ ollama_model: "m" }), false, "a file from before 0.3");
   assert.equal(R.hideProjectsOf(null), false);
+  assert.equal(R.hideProjectsOf(undefined), false);
 });
+
+const S = await import(build("../src/lib/settings.ts", "settings.mjs"));
+const base = { ollama_url: "loopback", ollama_model: "m", local_context_limit: 1,
+  local_output_limit: 1, model_labels_enabled: false, allow_remote_ollama: false,
+  monthly_budget_usd: 300, amber_pct: 80, red_pct: 100, show_in_menu_bar: true, report_hide_projects: false };
+
+test("a budget save from an old copy keeps a hide toggle made since", () => {
+  const latest = { ...base, report_hide_projects: true };
+  const draft = { ...base, monthly_budget_usd: 450 }; // copied before Hide was ticked
+  const sent = S.withOwnFields(latest, draft, S.BUDGET_FIELDS);
+  assert.equal(sent.report_hide_projects, true);
+  assert.equal(sent.monthly_budget_usd, 450);
+});
+
+test("a model save from an old copy keeps the budget and the hide setting", () => {
+  const latest = { ...base, monthly_budget_usd: 450, report_hide_projects: true };
+  const draft = { ...base, ollama_model: "qwen3:32b" };
+  const sent = S.withOwnFields(latest, draft, S.LOCAL_MODEL_FIELDS);
+  assert.deepEqual(sent, { ...latest, ollama_model: "qwen3:32b" });
+});
+
+test("with nothing cached, a save sends the draft as it is", () => {
+  assert.deepEqual(S.withOwnFields(undefined, base, S.BUDGET_FIELDS), base);
+});
+
+rmSync(out, { recursive: true, force: true });
 
 const view = { day: "2026-10-15", rate_source: "list", budget: {
   monthly_budget: 0, days_in_month: 31, days_elapsed: 15, days_left: 17, daily_allowance: 0, today: 1,
@@ -76,8 +94,8 @@ test("the tray offers Save weekly report, which only asks the main window", () =
 });
 
 test("the new UI strings have no en or em dash", () => {
-  for (const f of ["../src/lib/report.ts", "../src/components/WeeklyReportButton.tsx", "../src/screens/TrayPanel.tsx"]) {
+  for (const f of ["../src/lib/report.ts", "../src/lib/settings.ts", "../src/components/WeeklyReportButton.tsx", "../src/screens/TrayPanel.tsx"]) {
     const text = readFileSync(fileURLToPath(new URL(f, import.meta.url)), "utf8");
-    assert.doesNotMatch(text, /[–—]/, f);
+    assert.doesNotMatch(text, /[\u2013\u2014]/, f);
   }
 });
