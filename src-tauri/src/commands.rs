@@ -471,10 +471,8 @@ mod tests {
         let split = work_split(&state, &clock).unwrap();
         assert!(split.overhead_usd > 0.0, "the fixture's compaction is overhead");
         assert!(split.work_usd > 0.0);
-        // The same calls. Cost by activity also charges the fixture's 3 web searches
-        // ($10 per 1,000); the day view, and so the gauge, leaves them out.
-        let web = 3.0 * 10.0 / 1000.0;
-        assert!((split.work_usd + split.overhead_usd - (v.budget.today + web)).abs() < 1e-9, "{split:?} vs {}", v.budget.today);
+        // The same calls, the fixture's 3 web searches ($10 per 1,000) included in both.
+        assert!((split.work_usd + split.overhead_usd - v.budget.today).abs() < 1e-9, "{split:?} vs {}", v.budget.today);
 
         // The next day has none of it.
         let next = UtcDay(NaiveDate::from_ymd_opt(2026, 10, 2).unwrap());

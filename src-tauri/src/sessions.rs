@@ -91,7 +91,7 @@ impl Store {
         let msql = format!(
             "SELECT session_id, project, COALESCE({m},'unknown'), COUNT(*),
                     SUM(input_tokens), SUM(output_tokens), SUM(cache_read),
-                    SUM(ephemeral_1h), SUM(ephemeral_5m), MIN(ts), MAX(ts)
+                    SUM(ephemeral_1h), SUM(ephemeral_5m), MIN(ts), MAX(ts), SUM(web_searches)
              FROM messages {w} GROUP BY session_id, {m}",
             m = price.model_sql()
         );
@@ -101,13 +101,14 @@ impl Store {
                 r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
                 r.get::<_, i64>(3)?, r.get::<_, i64>(4)?, r.get::<_, i64>(5)?, r.get::<_, i64>(6)?,
                 r.get::<_, i64>(7)?, r.get::<_, i64>(8)?, r.get::<_, String>(9)?, r.get::<_, String>(10)?,
+                r.get::<_, i64>(11)?,
             ))
         })?;
 
         let mut acc: BTreeMap<String, Acc> = BTreeMap::new();
         for row in rows {
-            let (sid, project, model, msgs, input, output, cr, e1h, e5m, min_ts, max_ts) = row?;
-            let tb = TokenBreakdown { input, output, cache_creation_5m: e5m, cache_creation_1h: e1h, cache_read: cr, ..Default::default() };
+            let (sid, project, model, msgs, input, output, cr, e1h, e5m, min_ts, max_ts, web) = row?;
+            let tb = TokenBreakdown { input, output, cache_creation_5m: e5m, cache_creation_1h: e1h, cache_read: cr, web_searches: web };
             let a = acc.entry(sid).or_insert(Acc {
                 project,
                 started: None,
@@ -215,20 +216,20 @@ impl Store {
         // Per-model within the session.
         let mut mstmt = self.conn.prepare(&format!(
             "SELECT COALESCE({m},'unknown'), COUNT(*), SUM(input_tokens), SUM(output_tokens),
-                    SUM(cache_read), SUM(ephemeral_1h), SUM(ephemeral_5m)
+                    SUM(cache_read), SUM(ephemeral_1h), SUM(ephemeral_5m), SUM(web_searches)
              FROM messages WHERE session_id = ?1 AND dup = 0 GROUP BY {m} ORDER BY 3 DESC",
             m = price.model_sql()
         ))?;
         let mrows = mstmt.query_map(rusqlite::params![session_id], |r| {
             Ok((
                 r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?,
-                r.get::<_, i64>(4)?, r.get::<_, i64>(5)?, r.get::<_, i64>(6)?,
+                r.get::<_, i64>(4)?, r.get::<_, i64>(5)?, r.get::<_, i64>(6)?, r.get::<_, i64>(7)?,
             ))
         })?;
         let mut by_model: Vec<SessionModel> = Vec::new();
         for row in mrows {
-            let (model, msgs, input, output, cr, e1h, e5m) = row?;
-            let tb = TokenBreakdown { input, output, cache_creation_5m: e5m, cache_creation_1h: e1h, cache_read: cr, ..Default::default() };
+            let (model, msgs, input, output, cr, e1h, e5m, web) = row?;
+            let tb = TokenBreakdown { input, output, cache_creation_5m: e5m, cache_creation_1h: e1h, cache_read: cr, web_searches: web };
             let cost_usd = price.cost(&model, &tb);
             let name = without_long(&model);
             match by_model.iter_mut().find(|b| b.model == name) {
@@ -379,5 +380,21 @@ mod tests {
         let mut sorted = ts.clone();
         sorted.sort();
         assert_eq!(ts, sorted);
+    }
+
+    #[test]
+    fn a_sessions_cost_includes_its_web_searches() {
+        let mut store = Store::open_in_memory();
+        let content = r#"{"type":"assistant","sessionId":"sw","timestamp":"2026-10-02T12:00:00.000Z","message":{"id":"w1","role":"assistant","model":"claude-opus-5-5","usage":{"input_tokens":1000,"server_tool_use":{"web_search_requests":4}}}}"#;
+        let sf = ScannedFile { path: "/x/p/sw.jsonl".into(), project: "p".into(), size: 1, mtime: 1, subagent: None };
+        store.replace_file(&sf, &parse_str("p", content)).unwrap();
+        store.rebuild_sessions().unwrap();
+        let p = PriceTable::seed();
+        let want = p.cost("claude-opus-5-5", &TokenBreakdown { input: 1000, ..Default::default() }) + 4.0 * 10.0 / 1000.0;
+        let listed = store.get_sessions(&p, &Filters::default()).unwrap();
+        assert!((listed[0].cost_usd - want).abs() < 1e-9, "{}", listed[0].cost_usd);
+        let detail = store.get_session_detail(&p, "sw").unwrap();
+        assert!((detail.summary.cost_usd - want).abs() < 1e-9);
+        assert!((detail.by_model[0].cost_usd - want).abs() < 1e-9, "{}", detail.by_model[0].cost_usd);
     }
 }

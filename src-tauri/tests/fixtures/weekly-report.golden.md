@@ -6,21 +6,21 @@ Monday 26 Oct 2026 to Sunday 1 Nov 2026, local time. Written 3 Nov 2026 at 09:15
 
 | | This week | Week before | Change |
 |---|---:|---:|---:|
-| API-equivalent cost | $36.83 | $0.84 | +4285% |
+| API-equivalent cost | $36.86 | $0.84 | +4288% |
 | Sessions | 13 | 1 | +1200% |
 | Messages | 38 | 2 | +1800% |
 | Input tokens | 12,000,000 | 200,000 | +5900% |
 | Output tokens | 235,000 | 1,000 | +23400% |
 | Cache read tokens | 6,000,000 | 100,000 | +5900% |
 | Cache write tokens | 0 | 0 | 0% |
-| Web searches (not priced) | 3 | 0 | new |
+| Web searches | 3 | 0 | new |
 
 ## By day
 
 | Day | Cost | Messages |
 |---|---:|---:|
 | Mon 26 Oct | $0.00 | 0 |
-| Tue 27 Oct | $35.58 | 36 |
+| Tue 27 Oct | $35.61 | 36 |
 | Wed 28 Oct | $0.00 | 0 |
 | Thu 29 Oct | $0.00 | 0 |
 | Fri 30 Oct | $0.00 | 0 |
@@ -31,7 +31,7 @@ Monday 26 Oct 2026 to Sunday 1 Nov 2026, local time. Written 3 Nov 2026 at 09:15
 
 | Model | Cost | Share | Messages |
 |---|---:|---:|---:|
-| claude-opus-5-5 | $21.50 | 58% | 9 |
+| claude-opus-5-5 | $21.53 | 58% | 9 |
 | claude-sonnet-4-6 | $13.46 | 37% | 8 |
 | claude-haiku-5-5 | $1.87 | 5% | 8 |
 | No model (your prompts) | $0.00 | 0% | 13 |
@@ -40,7 +40,7 @@ Monday 26 Oct 2026 to Sunday 1 Nov 2026, local time. Written 3 Nov 2026 at 09:15
 
 | Project | Cost | Sessions | Share |
 |---|---:|---:|---:|
-| -Users-me-dev-alpha | $9.35 | 2 | 25% |
+| -Users-me-dev-alpha | $9.38 | 2 | 25% |
 | -Users-me-dev-delta | $6.08 | 1 | 16% |
 | -Users-me-dev-bravo | $5.69 | 1 | 15% |
 | -Users-me-dev-echo | $4.14 | 1 | 11% |
@@ -56,7 +56,7 @@ Monday 26 Oct 2026 to Sunday 1 Nov 2026, local time. Written 3 Nov 2026 at 09:15
 
 | Date | Project | Duration | Cost |
 |---|---|---:|---:|
-| Tue 27 Oct | -Users-me-dev-alpha | 1 h 20 min | $8.10 |
+| Tue 27 Oct | -Users-me-dev-alpha | 1 h 20 min | $8.13 |
 | Tue 27 Oct | -Users-me-dev-delta | 1 h 20 min | $6.08 |
 | Tue 27 Oct | -Users-me-dev-bravo | 1 h 20 min | $5.69 |
 | Tue 27 Oct | -Users-me-dev-echo | 1 h 20 min | $4.14 |

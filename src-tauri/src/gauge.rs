@@ -60,6 +60,7 @@ struct Call {
     cache_read: i64,
     e1h: i64,
     e5m: i64,
+    web_searches: i64,
 }
 
 impl Call {
@@ -74,6 +75,7 @@ impl Call {
             cache_read: m.cache_read,
             e1h: m.ephemeral_1h,
             e5m: m.ephemeral_5m,
+            web_searches: m.web_searches,
         }
     }
 
@@ -86,6 +88,7 @@ impl Call {
         self.cache_read = self.cache_read.max(o.cache_read);
         self.e1h = self.e1h.max(o.e1h);
         self.e5m = self.e5m.max(o.e5m);
+        self.web_searches = self.web_searches.max(o.web_searches);
     }
 }
 
@@ -294,6 +297,7 @@ impl Tally {
             tb.cache_read += c.cache_read;
             tb.cache_creation_1h += c.e1h;
             tb.cache_creation_5m += c.e5m;
+            tb.web_searches += c.web_searches;
         }
         let mut spend = Spend { day: today, today: 0.0, month_to_date: 0.0 };
         for ((day, key), tb) in &sums {

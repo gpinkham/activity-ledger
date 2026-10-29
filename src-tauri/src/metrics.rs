@@ -1,5 +1,5 @@
 use crate::pricing::{without_long, PriceTable, TokenBreakdown};
-use crate::gauge::{Clock, SystemClock};
+use crate::gauge::{iso, Clock, SystemClock};
 use crate::store::Store;
 use chrono::{NaiveDate, NaiveDateTime};
 use serde::{Deserialize, Serialize};
@@ -98,17 +98,41 @@ pub(crate) fn where_clause(f: &Filters) -> (String, Vec<(String, String)>) {
     (sql, binds)
 }
 
+/// `f` with its `from` and `to` days read as local days of `clock`: each becomes
+/// the instant that day starts (or the next one ends), so a total covers the same
+/// calls as `by_day_with`. A day that does not parse stays a UTC date, as before.
+pub(crate) fn local_days(f: &Filters, clock: &dyn Clock) -> Filters {
+    let day = |s: &Option<String>| s.as_ref().and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok());
+    let mut out = f.clone();
+    if let Some(d) = day(&f.from) {
+        let t = iso(clock.start_of(d));
+        out.from = None;
+        out.from_ts = Some(match &f.from_ts { Some(x) if *x > t => x.clone(), _ => t });
+    }
+    if let Some(d) = day(&f.to) {
+        let t = iso(clock.start_of(d + chrono::Duration::days(1)));
+        out.to = None;
+        out.to_ts = Some(match &f.to_ts { Some(x) if *x < t => x.clone(), _ => t });
+    }
+    out
+}
+
 pub(crate) fn bind<'a>(binds: &'a [(String, String)]) -> Vec<(&'a str, &'a dyn rusqlite::ToSql)> {
     binds.iter().map(|(k, v)| (k.as_str(), v as &dyn rusqlite::ToSql)).collect()
 }
 
 impl Store {
     pub fn totals(&self, price: &PriceTable, f: &Filters) -> rusqlite::Result<Totals> {
-        let (w, binds) = where_clause(f);
+        self.totals_with(price, f, &SystemClock)
+    }
+
+    /// `totals` over the local days of `clock`, the days the Overview chart shows.
+    pub fn totals_with(&self, price: &PriceTable, f: &Filters, clock: &dyn Clock) -> rusqlite::Result<Totals> {
+        let (w, binds) = where_clause(&local_days(f, clock));
         let m = price.model_sql();
         let sql = format!(
             "SELECT {m}, SUM(input_tokens), SUM(output_tokens), SUM(cache_creation), SUM(cache_read),
-                    SUM(ephemeral_1h), SUM(ephemeral_5m), COUNT(*)
+                    SUM(ephemeral_1h), SUM(ephemeral_5m), COUNT(*), SUM(web_searches)
              FROM messages {w} GROUP BY {m}"
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -116,19 +140,19 @@ impl Store {
             Ok((
                 r.get::<_, Option<String>>(0)?.unwrap_or_default(),
                 r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?, r.get::<_, i64>(4)?,
-                r.get::<_, i64>(5)?, r.get::<_, i64>(6)?, r.get::<_, i64>(7)?,
+                r.get::<_, i64>(5)?, r.get::<_, i64>(6)?, r.get::<_, i64>(7)?, r.get::<_, i64>(8)?,
             ))
         })?;
         let mut t = Totals { sessions: 0, messages: 0, input_tokens: 0, output_tokens: 0,
             cache_creation: 0, cache_read: 0, est_cost_usd: 0.0, saved_usd: 0.0, cache_hit_ratio: 0.0 };
         for row in rows {
-            let (model, input, output, cc, cr, e1h, e5m, msgs) = row?;
+            let (model, input, output, cc, cr, e1h, e5m, msgs, web) = row?;
             t.input_tokens += input;
             t.output_tokens += output;
             t.cache_creation += cc;
             t.cache_read += cr;
             t.messages += msgs;
-            let tb = TokenBreakdown { input, output, cache_creation_5m: e5m, cache_creation_1h: e1h, cache_read: cr, ..Default::default() };
+            let tb = TokenBreakdown { input, output, cache_creation_5m: e5m, cache_creation_1h: e1h, cache_read: cr, web_searches: web };
             t.est_cost_usd += price.cost(&model, &tb);
             t.saved_usd += price.saved(&model, cr);
         }
@@ -141,11 +165,15 @@ impl Store {
     }
 
     pub fn by_model(&self, price: &PriceTable, f: &Filters) -> rusqlite::Result<Vec<ByModel>> {
-        let (w, binds) = where_clause(f);
+        self.by_model_with(price, f, &SystemClock)
+    }
+
+    pub fn by_model_with(&self, price: &PriceTable, f: &Filters, clock: &dyn Clock) -> rusqlite::Result<Vec<ByModel>> {
+        let (w, binds) = where_clause(&local_days(f, clock));
         let m = price.model_sql();
         let sql = format!(
             "SELECT {m}, COUNT(*), SUM(input_tokens+output_tokens), SUM(input_tokens), SUM(output_tokens),
-                    SUM(cache_read), SUM(ephemeral_1h), SUM(ephemeral_5m)
+                    SUM(cache_read), SUM(ephemeral_1h), SUM(ephemeral_5m), SUM(web_searches)
              FROM messages {w} GROUP BY {m} ORDER BY 3 DESC"
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -153,13 +181,13 @@ impl Store {
             Ok((
                 r.get::<_, Option<String>>(0)?.unwrap_or_else(|| "unknown".into()),
                 r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?, r.get::<_, i64>(4)?,
-                r.get::<_, i64>(5)?, r.get::<_, i64>(6)?, r.get::<_, i64>(7)?,
+                r.get::<_, i64>(5)?, r.get::<_, i64>(6)?, r.get::<_, i64>(7)?, r.get::<_, i64>(8)?,
             ))
         })?;
         let mut out: Vec<ByModel> = Vec::new();
         for row in rows {
-            let (model, msgs, tokens, input, output, cr, e1h, e5m) = row?;
-            let tb = TokenBreakdown { input, output, cache_creation_5m: e5m, cache_creation_1h: e1h, cache_read: cr, ..Default::default() };
+            let (model, msgs, tokens, input, output, cr, e1h, e5m, web) = row?;
+            let tb = TokenBreakdown { input, output, cache_creation_5m: e5m, cache_creation_1h: e1h, cache_read: cr, web_searches: web };
             let cost_usd = price.cost(&model, &tb);
             // A model's long prompts are priced apart but shown in its own row.
             let name = without_long(&model);
@@ -206,7 +234,7 @@ impl Store {
         let (w, binds) = where_clause(&wide);
         let sql = format!(
             "SELECT substr(ts,1,16) AS minute, {m}, COUNT(*), SUM(input_tokens), SUM(output_tokens),
-                    SUM(cache_read), SUM(ephemeral_1h), SUM(ephemeral_5m)
+                    SUM(cache_read), SUM(ephemeral_1h), SUM(ephemeral_5m), SUM(web_searches)
              FROM messages {w} GROUP BY minute, {m}",
             m = price.model_sql()
         );
@@ -215,13 +243,13 @@ impl Store {
             Ok((
                 r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?.unwrap_or_default(),
                 r.get::<_, i64>(2)?, r.get::<_, i64>(3)?, r.get::<_, i64>(4)?, r.get::<_, i64>(5)?,
-                r.get::<_, i64>(6)?, r.get::<_, i64>(7)?,
+                r.get::<_, i64>(6)?, r.get::<_, i64>(7)?, r.get::<_, i64>(8)?,
             ))
         })?;
         use std::collections::BTreeMap;
         let mut acc: BTreeMap<String, (i64, f64)> = BTreeMap::new();
         for row in rows {
-            let (minute, model, msgs, input, output, cr, e1h, e5m) = row?;
+            let (minute, model, msgs, input, output, cr, e1h, e5m, web) = row?;
             // A timestamp that does not parse keeps its UTC date, as before.
             let day = NaiveDateTime::parse_from_str(&minute, "%Y-%m-%dT%H:%M")
                 .map(|t| clock.date_of(t.and_utc()).format("%Y-%m-%d").to_string())
@@ -229,7 +257,7 @@ impl Store {
             if f.from.as_ref().is_some_and(|from| day < *from) || f.to.as_ref().is_some_and(|to| day > *to) {
                 continue;
             }
-            let tb = TokenBreakdown { input, output, cache_creation_5m: e5m, cache_creation_1h: e1h, cache_read: cr, ..Default::default() };
+            let tb = TokenBreakdown { input, output, cache_creation_5m: e5m, cache_creation_1h: e1h, cache_read: cr, web_searches: web };
             let e = acc.entry(day).or_insert((0, 0.0));
             e.0 += msgs;
             e.1 += price.cost(&model, &tb);
@@ -238,13 +266,17 @@ impl Store {
     }
 
     pub fn by_project(&self, price: &PriceTable, f: &Filters) -> rusqlite::Result<Vec<ByProject>> {
+        self.by_project_with(price, f, &SystemClock)
+    }
+
+    pub fn by_project_with(&self, price: &PriceTable, f: &Filters, clock: &dyn Clock) -> rusqlite::Result<Vec<ByProject>> {
         // Note: project filter is ignored for this rollup (it compares projects).
-        let mut f2 = f.clone();
+        let mut f2 = local_days(f, clock);
         f2.project = None;
         let (w, binds) = where_clause(&f2);
         let msql = format!(
             "SELECT project, {m}, SUM(input_tokens), SUM(output_tokens),
-                    SUM(cache_read), SUM(ephemeral_1h), SUM(ephemeral_5m)
+                    SUM(cache_read), SUM(ephemeral_1h), SUM(ephemeral_5m), SUM(web_searches)
              FROM messages {w} GROUP BY project, {m}",
             m = price.model_sql()
         );
@@ -253,14 +285,14 @@ impl Store {
             Ok((
                 r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?.unwrap_or_default(),
                 r.get::<_, i64>(2)?, r.get::<_, i64>(3)?, r.get::<_, i64>(4)?,
-                r.get::<_, i64>(5)?, r.get::<_, i64>(6)?,
+                r.get::<_, i64>(5)?, r.get::<_, i64>(6)?, r.get::<_, i64>(7)?,
             ))
         })?;
         use std::collections::BTreeMap;
         let mut acc: BTreeMap<String, ByProject> = BTreeMap::new();
         for row in rows {
-            let (project, model, input, output, cr, e1h, e5m) = row?;
-            let tb = TokenBreakdown { input, output, cache_creation_5m: e5m, cache_creation_1h: e1h, cache_read: cr, ..Default::default() };
+            let (project, model, input, output, cr, e1h, e5m, web) = row?;
+            let tb = TokenBreakdown { input, output, cache_creation_5m: e5m, cache_creation_1h: e1h, cache_read: cr, web_searches: web };
             let e = acc.entry(project.clone()).or_insert(ByProject {
                 project, sessions: 0, tokens: 0, cost_usd: 0.0, tool_calls: 0, edit_write: 0, web: 0,
             });
@@ -473,5 +505,73 @@ mod tests {
         let projects = store.by_project(&PriceTable::seed(), &Filters::default()).unwrap();
         let proj_a = projects.iter().find(|p| p.project == "proj-a").unwrap();
         assert_eq!(proj_a.sessions, 2);
+    }
+
+    /// Three Opus calls of 1,000 input tokens: 03:30 UTC on Oct 2 (the evening of
+    /// Oct 1 four hours west), 23:30 UTC on Oct 2 with 2 web searches, and noon UTC on
+    /// Oct 3. Projects p and q.
+    fn local_day_store() -> Store {
+        let mut store = Store::open_in_memory();
+        let line = |id: &str, sid: &str, ts: &str, web: i64| format!(
+            r#"{{"type":"assistant","sessionId":"{sid}","timestamp":"{ts}","message":{{"id":"{id}","role":"assistant","model":"claude-opus-5-5","usage":{{"input_tokens":1000,"server_tool_use":{{"web_search_requests":{web}}}}}}}}}"#) + "\n";
+        for (project, content) in [
+            ("p", line("a", "s1", "2026-10-02T03:30:00.000Z", 0) + &line("b", "s1", "2026-10-02T23:30:00.000Z", 2)),
+            ("q", line("c", "s2", "2026-10-03T12:00:00.000Z", 0)),
+        ] {
+            let sf = ScannedFile { path: format!("/x/{project}/s.jsonl").into(), project: project.into(), size: 1, mtime: 1, subagent: None };
+            store.replace_file(&sf, &parse_str(project, &content)).unwrap();
+        }
+        store.rebuild_sessions().unwrap();
+        store
+    }
+
+    #[test]
+    fn the_total_card_is_the_sum_of_the_chart_for_the_same_local_days() {
+        let store = local_day_store();
+        let p = PriceTable::seed();
+        let one = |d: &str| Filters { from: Some(d.into()), to: Some(d.into()), ..Default::default() };
+        let cases = [
+            (Filters::default(), 3),
+            (one("2026-10-01"), 1),
+            (one("2026-10-02"), 1),
+            (one("2026-10-03"), 1),
+            (Filters { from: Some("2026-10-02".into()), ..Default::default() }, 2),
+            (Filters { to: Some("2026-10-01".into()), ..Default::default() }, 1),
+            (Filters { from: Some("2026-10-01".into()), to: Some("2026-10-02".into()), ..Default::default() }, 2),
+        ];
+        for (f, messages) in cases {
+            let chart = store.by_day_with(&p, &f, &West).unwrap();
+            let chart_cost: f64 = chart.iter().map(|d| d.cost_usd).sum();
+            let chart_msgs: i64 = chart.iter().map(|d| d.messages).sum();
+            let t = store.totals_with(&p, &f, &West).unwrap();
+            assert_eq!((t.messages, chart_msgs), (messages, messages), "{f:?}");
+            assert!((t.est_cost_usd - chart_cost).abs() < 1e-9, "{f:?}: card {} vs chart {chart_cost}", t.est_cost_usd);
+            let models: f64 = store.by_model_with(&p, &f, &West).unwrap().iter().map(|m| m.cost_usd).sum();
+            assert!((models - chart_cost).abs() < 1e-9, "{f:?}: by model {models} vs chart {chart_cost}");
+            let projects: f64 = store.by_project_with(&p, &f, &West).unwrap().iter().map(|m| m.cost_usd).sum();
+            assert!((projects - chart_cost).abs() < 1e-9, "{f:?}: by project {projects} vs chart {chart_cost}");
+        }
+        // Oct 1 is a local day with one call, all of it on the next UTC date.
+        let oct1 = store.by_project_with(&p, &one("2026-10-01"), &West).unwrap();
+        assert_eq!(oct1.iter().map(|r| (r.project.as_str(), r.sessions)).collect::<Vec<_>>(), vec![("p", 1)]);
+    }
+
+    #[test]
+    fn web_searches_are_priced_in_every_cost_rollup() {
+        let store = local_day_store();
+        let p = PriceTable::seed();
+        let call = p.cost("claude-opus-5-5", &TokenBreakdown { input: 1000, ..Default::default() });
+        let web = 2.0 * 10.0 / 1000.0;
+        let f = Filters::default();
+        let total = store.totals_with(&p, &f, &West).unwrap().est_cost_usd;
+        assert!((total - (3.0 * call + web)).abs() < 1e-9, "{total}");
+        let model = store.by_model_with(&p, &f, &West).unwrap();
+        assert!((model[0].cost_usd - total).abs() < 1e-9);
+        let days = store.by_day_with(&p, &f, &West).unwrap();
+        let oct2 = days.iter().find(|d| d.day == "2026-10-02").unwrap();
+        assert!((oct2.cost_usd - (call + web)).abs() < 1e-9, "the searches are Oct 2's");
+        let projects = store.by_project_with(&p, &f, &West).unwrap();
+        let pp = projects.iter().find(|r| r.project == "p").unwrap();
+        assert!((pp.cost_usd - (2.0 * call + web)).abs() < 1e-9);
     }
 }

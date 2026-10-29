@@ -183,8 +183,8 @@ pub fn build_report(
         ("Output tokens", t.output_tokens, b.output_tokens),
         ("Cache read tokens", t.cache_read, b.cache_read),
         ("Cache write tokens", t.cache_creation, b.cache_creation),
-        // Counted, not priced, as everywhere else in the app outside Cost by activity.
-        ("Web searches (not priced)", now.web_searches, before.web_searches),
+        // Priced in the cost above, at $10 per 1,000.
+        ("Web searches", now.web_searches, before.web_searches),
     ] {
         let _ = writeln!(md, "| {label} | {} | {} | {} |", count(n), count(p), change(n as f64, p as f64));
     }
