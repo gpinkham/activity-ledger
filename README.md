@@ -74,7 +74,7 @@ The app asks the model for a JSON answer limited to the label list (Ollama's str
 
 ## Install
 
-There is no signed download yet. Build it from source.
+Download the signed app from the [latest release](https://github.com/gpinkham/activity-ledger/releases/latest): one zip that runs on Apple silicon and Intel Macs, signed with a Developer ID and notarized by Apple, so it opens like any other app. Unzip it and move Activity Ledger to Applications. To build it yourself instead, read on.
 
 ### Requirements
 
@@ -98,7 +98,7 @@ rustup target add aarch64-apple-darwin x86_64-apple-darwin
 npm run build:universal
 ```
 
-The built app is under `src-tauri/target/.../bundle/macos/`. It is not signed or notarized, so the first time you open it, right click it and choose **Open**.
+The built app is under `src-tauri/target/.../bundle/macos/`. A build you make yourself is not signed or notarized, so the first time you open it, right click it and choose **Open**. The download from the releases page needs no such step.
 
 ### Signed build (maintainers)
 
