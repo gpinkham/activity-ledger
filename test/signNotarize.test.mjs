@@ -10,7 +10,7 @@ import { spawnSync } from "node:child_process";
 const identity = "Developer ID Application: Test Name (TEAM1)";
 
 /** A copy of the script in a fresh tree, with stand-ins for every outside tool. */
-function setup({ targets }) {
+function setup({ targets, stapler = true }) {
   const root = mkdtempSync(join(tmpdir(), "al-sign-"));
   mkdirSync(join(root, "scripts"));
   copyFileSync(new URL("../scripts/sign-notarize.sh", import.meta.url), join(root, "scripts", "sign-notarize.sh"));
@@ -32,6 +32,9 @@ function setup({ targets }) {
   stub("ditto", 'for a; do last="$a"; done; : > "$last"');
   stub("xcrun", [
     'case "$1 $2" in',
+    // As on older macOS: `stapler help` fails even where the tool is there.
+    '  "stapler help") exit 1 ;;',
+    `  "--find stapler") ${stapler ? "echo /usr/bin/stapler" : "exit 72"} ;;`,
     '  "notarytool submit") echo "  id: 1234-abcd"; echo "  status: Invalid"; exit 69 ;;',
     '  "notarytool log") echo "NOTARY LOG $3" ;;',
     "esac",
@@ -59,6 +62,18 @@ test("a failed submit still fetches the notary log", () => {
   assert.ok(r.stdout.includes("NOTARY LOG 1234-abcd"), r.stdout + r.stderr);
   assert.ok(r.stderr.includes("notarization was not accepted"), r.stderr);
   assert.ok(s.keychainAsked(), "the identity check ran, against the stand-in");
+});
+
+test("a missing stapler stops it before the keychain; a failing `stapler help` does not", () => {
+  const missing = setup({ targets: [], stapler: false });
+  const r = missing.run("--skip-build");
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.ok(r.stderr.includes("xcrun stapler is missing"), r.stderr);
+  assert.ok(!missing.keychainAsked());
+  const present = setup({ targets: [] });
+  const ok = present.run("--skip-build");
+  assert.ok(!ok.stderr.includes("stapler is missing"), ok.stderr);
+  assert.ok(present.keychainAsked(), "it went on past the tool checks");
 });
 
 test("uncommitted changes stop it before the keychain: the zip is named after the commit", () => {

@@ -45,7 +45,8 @@ case "$identity" in
 esac
 [ "$(uname -s)" = "Darwin" ] || die "this runs on macOS only."
 xcrun notarytool --version >/dev/null 2>&1 || die "xcrun notarytool is missing; install Xcode 13 or later command line tools."
-xcrun stapler help >/dev/null 2>&1 || die "xcrun stapler is missing."
+# `xcrun stapler help` exits non-zero on some macOS versions, so only look the tool up.
+xcrun --find stapler >/dev/null 2>&1 || die "xcrun stapler is missing."
 if [ "$skip_build" -eq 0 ]; then
   # The universal build compiles for both chips, so both Rust targets must be there.
   command -v rustup >/dev/null 2>&1 || die "rustup is missing; the universal build needs it for the Rust targets."
