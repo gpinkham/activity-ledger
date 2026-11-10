@@ -1,7 +1,7 @@
 {
   "name": "activity-ledger",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "A local desktop app that shows what your Claude Code sessions cost, by kind of work.",
   "license": "MIT",
   "type": "module",
