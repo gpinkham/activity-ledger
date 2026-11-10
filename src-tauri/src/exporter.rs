@@ -33,7 +33,14 @@ pub struct BundleTool { pub tool: String, pub count: i64 }
 pub struct BundleDay { pub day: String, pub messages: i64, pub cost_usd: f64 }
 
 #[derive(Debug, Serialize)]
-pub struct BundleProject { pub project_id: String, pub sessions: i64, pub tokens: i64, pub cost_usd: f64 }
+pub struct BundleProject {
+    pub project_id: String,
+    /// The Claude account, hashed like the project; empty when it was read without one.
+    pub account_id: String,
+    pub sessions: i64,
+    pub tokens: i64,
+    pub cost_usd: f64,
+}
 
 #[derive(Debug, Serialize)]
 pub struct DateRange { pub from: Option<String>, pub to: Option<String> }
@@ -44,6 +51,8 @@ pub struct Bundle {
     pub generated_at: String,
     pub machine_id: String,
     pub date_range: DateRange,
+    /// The account the bundle was filtered to, hashed; none is every account.
+    pub account_id: Option<String>,
     pub totals: BundleTotals,
     pub by_model: Vec<BundleModel>,
     pub by_tool: Vec<BundleTool>,
@@ -71,6 +80,7 @@ pub fn build_bundle(
     let projects = store.by_project(price, f)?.into_iter()
         .map(|p| BundleProject {
             project_id: hash_id(&salt, &p.project),
+            account_id: if p.account.is_empty() { String::new() } else { hash_id(&salt, &p.account) },
             sessions: p.sessions,
             tokens: p.tokens,
             cost_usd: p.cost_usd,
@@ -82,6 +92,7 @@ pub fn build_bundle(
         generated_at: generated_at.to_string(),
         machine_id: hash_id(&salt, &store.machine_id()),
         date_range: DateRange { from: f.from.clone(), to: f.to.clone() },
+        account_id: f.account.as_ref().map(|a| hash_id(&salt, a)),
         totals: BundleTotals {
             sessions: t.sessions,
             messages: t.messages,
@@ -107,7 +118,7 @@ mod tests {
     fn seeded() -> Store {
         let mut store = Store::open_in_memory();
         let parsed = parse_str("proj-secret-name", include_str!("../tests/fixtures/sample.jsonl"));
-        let sf = ScannedFile { path: "/x/proj/s1.jsonl".into(), project: "proj-secret-name".into(), size: 1, mtime: 1, subagent: None };
+        let sf = ScannedFile { path: "/x/proj/s1.jsonl".into(), project: "proj-secret-name".into(), size: 1, mtime: 1, subagent: None, account: String::new() };
         store.replace_file(&sf, &parsed).unwrap();
         store.rebuild_sessions().unwrap();
         store

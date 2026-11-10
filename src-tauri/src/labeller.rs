@@ -330,7 +330,7 @@ mod tests {
         let content = lines.join("\n");
         std::fs::write(&path, &content).unwrap();
         let mut store = Store::open_in_memory();
-        let sf = ScannedFile { path: path.clone(), project: "p".into(), size: 1, mtime: 1, subagent: None };
+        let sf = ScannedFile { path: path.clone(), project: "p".into(), size: 1, mtime: 1, subagent: None, account: String::new() };
         store.replace_file(&sf, &parse_str("p", &content)).unwrap();
         store.rebuild_sessions().unwrap();
         (store, dir)
@@ -410,7 +410,7 @@ mod tests {
                 "content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"mv inbox/a.json inbox/.done/"}}]}}),
         ].iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n");
         let mut store = Store::open_in_memory();
-        let sf = ScannedFile { path: "/x/h.jsonl".into(), project: "h".into(), size: 1, mtime: 1, subagent: None };
+        let sf = ScannedFile { path: "/x/h.jsonl".into(), project: "h".into(), size: 1, mtime: 1, subagent: None, account: String::new() };
         store.replace_file(&sf, &crate::parser::parse_with("h", &content, &on.matcher(None))).unwrap();
         let raw = store.raw_label_jobs(&PriceTable::seed(), &Filters::default(), "m").unwrap();
         assert_eq!(raw.len(), 1);

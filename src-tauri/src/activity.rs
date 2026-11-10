@@ -729,7 +729,7 @@ mod tests {
     fn fixture() -> Store {
         let mut store = Store::open_in_memory();
         let add = |store: &mut Store, path: &str, sub: Option<SubagentMeta>, content: String| {
-            let sf = ScannedFile { path: path.into(), project: "p".into(), size: 1, mtime: 1, subagent: sub };
+            let sf = ScannedFile { path: path.into(), project: "p".into(), size: 1, mtime: 1, subagent: sub, account: String::new() };
             store.replace_file(&sf, &parse_str("p", &content)).unwrap();
         };
         let dev = lines(&[
@@ -895,7 +895,7 @@ mod tests {
             json!({"type":"cost-state","sessionId":"s-h","totalCostUSD":1.0,"startTime":1791190800000i64}),
         ]);
         let mut store = Store::open_in_memory();
-        let sf = ScannedFile { path: "/x/p/s-h.jsonl".into(), project: "p".into(), size: 1, mtime: 1, subagent: None };
+        let sf = ScannedFile { path: "/x/p/s-h.jsonl".into(), project: "p".into(), size: 1, mtime: 1, subagent: None, account: String::new() };
         store.replace_file(&sf, &parse_str("p", &content)).unwrap();
         store.rebuild_sessions().unwrap();
         let (p, f) = (PriceTable::seed(), Filters::default());
@@ -942,7 +942,7 @@ mod tests {
             call("s-solo", "2026-10-02T08:00:01.000Z", "o1", 14000, &[]),
             json!({"type":"cost-state","sessionId":"s-solo","totalCostUSD":0.02,"startTime":1790928000000i64}),
         ]);
-        let sf = ScannedFile { path: "/x/q/s-solo.jsonl".into(), project: "q".into(), size: 1, mtime: 1, subagent: None };
+        let sf = ScannedFile { path: "/x/q/s-solo.jsonl".into(), project: "q".into(), size: 1, mtime: 1, subagent: None, account: String::new() };
         store.replace_file(&sf, &parse_str("q", &content)).unwrap();
         store.rebuild_sessions().unwrap();
         let r = store.activity(&PriceTable::seed(), &Filters::default(), &AppSettings::default()).unwrap();
@@ -959,7 +959,7 @@ mod tests {
             v
         }]);
         let sf = ScannedFile { path: "/x/p/s-dev/subagents/agent-a2.jsonl".into(), project: "p".into(), size: 1, mtime: 1,
-            subagent: Some(SubagentMeta { agent_id: "a2".into(), parent_tool_use_id: None, agent_type: None }) };
+            subagent: Some(SubagentMeta { agent_id: "a2".into(), parent_tool_use_id: None, agent_type: None }), account: String::new() };
         store.replace_file(&sf, &parse_str("p", &child)).unwrap();
         store.rebuild_sessions().unwrap();
         let r = store.activity(&PriceTable::seed(), &Filters::default(), &AppSettings::default()).unwrap();
@@ -1006,7 +1006,7 @@ mod tests {
                 v.push(call(sid, &ts, &format!("{sid}-c{i}"), 1000, &[(&id, "Bash", json!({"command":"npm test"}))]));
                 v.push(results(sid, &ts, &[(&id, &format!("# pass 9\n# fail {n}"))]));
             }
-            let sf = ScannedFile { path: format!("/x/p/{sid}.jsonl").into(), project: "p".into(), size: 1, mtime: 1, subagent: None };
+            let sf = ScannedFile { path: format!("/x/p/{sid}.jsonl").into(), project: "p".into(), size: 1, mtime: 1, subagent: None, account: String::new() };
             store.replace_file(&sf, &parse_str("p", &lines(&v))).unwrap();
         }
         store.rebuild_sessions().unwrap();
@@ -1044,7 +1044,7 @@ mod tests {
             v.push(call(sid, &ts, &format!("c{i}"), 1000, &[(&id, "Bash", json!({ "command": cmd }))]));
             v.push(results(sid, &ts, &[(&id, &format!("# pass 9\n# fail {n}"))]));
         }
-        let sf = ScannedFile { path: "/x/p/s-mix.jsonl".into(), project: "p".into(), size: 1, mtime: 1, subagent: None };
+        let sf = ScannedFile { path: "/x/p/s-mix.jsonl".into(), project: "p".into(), size: 1, mtime: 1, subagent: None, account: String::new() };
         store.replace_file(&sf, &parse_str("p", &lines(&v))).unwrap();
         store.rebuild_sessions().unwrap();
         store.activity(&PriceTable::seed(), &Filters::default(), &AppSettings::default()).unwrap()
@@ -1073,7 +1073,7 @@ mod tests {
             call("s-p", "2026-10-01T10:00:09.000Z", "p2", 1000, &[("pt", "Bash", json!({"command":"npm test"}))]),
             results("s-p", "2026-10-01T10:00:09.500Z", &[("pt", "# fail 1")]),
         ]);
-        let sf = ScannedFile { path: "/x/p/s-p.jsonl".into(), project: "p".into(), size: 1, mtime: 1, subagent: None };
+        let sf = ScannedFile { path: "/x/p/s-p.jsonl".into(), project: "p".into(), size: 1, mtime: 1, subagent: None, account: String::new() };
         store.replace_file(&sf, &parse_str("p", &parent)).unwrap();
         // The sub-agent fails twice, then passes, all BEFORE the parent's failing run.
         let sub = |ts: &str, id: &str, tid: &str, out: &str| -> Vec<Value> {
@@ -1087,7 +1087,7 @@ mod tests {
         v.extend(sub("2026-10-01T10:00:03.000Z", "x2", "st2", "# fail 1"));
         v.extend(sub("2026-10-01T10:00:04.000Z", "x3", "st3", "# fail 0"));
         let sf = ScannedFile { path: "/x/p/s-p/subagents/agent-a9.jsonl".into(), project: "p".into(), size: 1, mtime: 1,
-            subagent: Some(SubagentMeta { agent_id: "a9".into(), parent_tool_use_id: Some("ag2".into()), agent_type: None }) };
+            subagent: Some(SubagentMeta { agent_id: "a9".into(), parent_tool_use_id: Some("ag2".into()), agent_type: None }), account: String::new() };
         store.replace_file(&sf, &parse_str("p", &lines(&v))).unwrap();
         store.rebuild_sessions().unwrap();
         let r = store.activity(&PriceTable::seed(), &Filters::default(), &AppSettings::default()).unwrap();
@@ -1151,7 +1151,7 @@ mod tests {
         let mut config = config.clone();
         config.adapters[0].root = Some("/h".into());
         let mut store = Store::open_in_memory();
-        let sf = ScannedFile { path: "/x/h/s-h.jsonl".into(), project: "h".into(), size: 1, mtime: 1, subagent: None };
+        let sf = ScannedFile { path: "/x/h/s-h.jsonl".into(), project: "h".into(), size: 1, mtime: 1, subagent: None, account: String::new() };
         store.replace_file(&sf, &crate::parser::parse_with("h", &harness_lines(), &config.matcher(None))).unwrap();
         store.sender_labels = [("s1", "standup"), ("j1", "scheduled job")].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
         store.rebuild_sessions().unwrap();
@@ -1183,7 +1183,7 @@ mod tests {
         let off = harness_store(&crate::triggers::TriggerConfig::default());
         let r = off.activity(&PriceTable::seed(), &Filters::default(), &AppSettings::default()).unwrap();
         let mut plain = Store::open_in_memory();
-        let sf = ScannedFile { path: "/x/h/s-h.jsonl".into(), project: "h".into(), size: 1, mtime: 1, subagent: None };
+        let sf = ScannedFile { path: "/x/h/s-h.jsonl".into(), project: "h".into(), size: 1, mtime: 1, subagent: None, account: String::new() };
         plain.replace_file(&sf, &parse_str("h", &harness_lines())).unwrap();
         plain.rebuild_sessions().unwrap();
         let p = plain.activity(&PriceTable::seed(), &Filters::default(), &AppSettings::default()).unwrap();

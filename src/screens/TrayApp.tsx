@@ -4,13 +4,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { panelPoller } from "../lib/gauge";
-import { fitPanel, getGauge, getGaugeSplit, openMainWindow, openWeeklyReport, quitApp } from "../lib/ipc";
+import { visibleAccounts } from "../lib/accounts";
+import { fitPanel, getAccounts, getGauge, getGaugeSplit, openMainWindow, openWeeklyReport, quitApp, setTrayAccount } from "../lib/ipc";
 import type { GaugeView, WorkSplit } from "../lib/types";
-import { TrayPanel } from "./TrayPanel";
+import { TrayPanel, type PanelAccount } from "./TrayPanel";
 
 export default function TrayApp() {
   const [view, setView] = useState<GaugeView | null>(null);
   const [split, setSplit] = useState<WorkSplit | null>(null);
+  const [accounts, setAccounts] = useState<PanelAccount[]>([]);
   const [error, setError] = useState<string | null>(null);
   const box = useRef<HTMLDivElement>(null);
 
@@ -18,13 +20,25 @@ export default function TrayApp() {
     try {
       setView(await getGauge());
       setError(null);
-      // The split brings the main cache up to date first, so it comes second; the
+      setAccounts(visibleAccounts(await getAccounts()).map(({ id, label, colour }) => ({ id, label, colour })));
+      // The split brings the main cache up to date first, so it comes last; the
       // last one stays on screen until it arrives.
       setSplit(await getGaugeSplit());
     } catch (e) {
       setError(String(e));
     }
   }, []);
+
+  // The ring follows the account picked here; the main window's budget card shows it too.
+  const pick = useCallback(async (id: string | null) => {
+    try {
+      await setTrayAccount(id);
+      setSplit(null);
+      await load();
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [load]);
 
   useEffect(() => {
     // The window is created hidden and shown straight away, before these listeners
@@ -59,8 +73,8 @@ export default function TrayApp() {
 
   return (
     <div ref={box}>
-      <TrayPanel view={view} split={split} error={error} onOpen={() => void openMainWindow()} onSaveReport={() => void openWeeklyReport()}
-        onQuit={() => void quitApp()} />
+      <TrayPanel view={view} split={split} error={error} accounts={accounts} onPickAccount={(id) => void pick(id)}
+        onOpen={() => void openMainWindow()} onSaveReport={() => void openWeeklyReport()} onQuit={() => void quitApp()} />
     </div>
   );
 }

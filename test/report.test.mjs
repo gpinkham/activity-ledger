@@ -57,18 +57,19 @@ test("the hide setting reads off for an older settings file or none", () => {
 const S = await import(build("../src/lib/settings.ts", "settings.mjs"));
 const base = { ollama_url: "loopback", ollama_model: "m", local_context_limit: 1,
   local_output_limit: 1, model_labels_enabled: false, allow_remote_ollama: false,
-  monthly_budget_usd: 300, amber_pct: 80, red_pct: 100, show_in_menu_bar: true, report_hide_projects: false };
+  show_in_menu_bar: false, report_hide_projects: false };
 
-test("a budget save from an old copy keeps a hide toggle made since", () => {
+test("a budget card save from an old copy keeps a hide toggle made since", () => {
   const latest = { ...base, report_hide_projects: true };
-  const draft = { ...base, monthly_budget_usd: 450 }; // copied before Hide was ticked
+  const draft = { ...base, show_in_menu_bar: true }; // copied before Hide was ticked
   const sent = S.withOwnFields(latest, draft, S.BUDGET_FIELDS);
   assert.equal(sent.report_hide_projects, true);
-  assert.equal(sent.monthly_budget_usd, 450);
+  assert.equal(sent.show_in_menu_bar, true);
+  assert.deepEqual([...S.BUDGET_FIELDS], ["show_in_menu_bar"], "budgets are per account, saved apart");
 });
 
-test("a model save from an old copy keeps the budget and the hide setting", () => {
-  const latest = { ...base, monthly_budget_usd: 450, report_hide_projects: true };
+test("a model save from an old copy keeps the menu bar and the hide setting", () => {
+  const latest = { ...base, show_in_menu_bar: true, report_hide_projects: true };
   const draft = { ...base, ollama_model: "qwen3:32b" };
   const sent = S.withOwnFields(latest, draft, S.LOCAL_MODEL_FIELDS);
   assert.deepEqual(sent, { ...latest, ollama_model: "qwen3:32b" });

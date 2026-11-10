@@ -6,6 +6,8 @@ import { useNav } from "../state/nav";
 import { ChartCard } from "../components/ChartCard";
 import { usd, compact } from "../lib/format";
 import type { ByProject } from "../lib/types";
+import { AccountChip, useAccounts } from "../components/Accounts";
+import { showAccountChips } from "../lib/accounts";
 
 type SortKey = "cost_usd" | "tokens" | "sessions" | "tool_calls";
 
@@ -14,6 +16,8 @@ export default function Projects() {
   const { openSessionsForProject } = useNav();
   const [sort, setSort] = useState<SortKey>("cost_usd");
   const q = useQuery({ queryKey: ["byProject", filters], queryFn: () => getByProject(filters) });
+  const accounts = useAccounts();
+  const chips = showAccountChips(accounts.data, filters.account);
 
   const rows = useMemo(() => {
     const data = [...(q.data ?? [])];
@@ -49,11 +53,16 @@ export default function Projects() {
         <tbody>
           {rows.map((p) => (
             <tr
-              key={p.project}
+              key={`${p.account}|${p.project}`}
               className="border-b border-line/50 hover:bg-elevated/50 cursor-pointer"
               onClick={() => openSessionsForProject(p.project)}
             >
-              <td className="px-2 py-1 font-mono text-xs">{p.project}</td>
+              <td className="px-2 py-1">
+                <span className="flex items-center gap-2">
+                  <span className="font-mono text-xs">{p.project}</span>
+                  {chips && <AccountChip id={p.account} accounts={accounts.data} />}
+                </span>
+              </td>
               <td className="px-2 py-1 tabular-nums">{compact(p.sessions)}</td>
               <td className="px-2 py-1 tabular-nums">{compact(p.tokens)}</td>
               <td className="px-2 py-1 tabular-nums">{usd(p.cost_usd)}</td>

@@ -1,3 +1,4 @@
+pub use crate::accounts::Root;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -9,6 +10,9 @@ pub struct ScannedFile {
     pub mtime: i64,
     /// Set for a sub-agent transcript (`<project>/<session>/subagents/agent-<id>.jsonl`).
     pub subagent: Option<SubagentMeta>,
+    /// The Claude account the transcript's folder belongs to (accounts.rs); empty
+    /// when the folder was read without one.
+    pub account: String,
 }
 
 /// What links a sub-agent's transcript to the call that started it, from the
@@ -62,27 +66,34 @@ pub fn scan_dir(root: &Path) -> Vec<ScannedFile> {
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        out.push(ScannedFile { path: path.to_path_buf(), project, size, mtime, subagent });
+        out.push(ScannedFile { path: path.to_path_buf(), project, size, mtime, subagent, account: String::new() });
     }
     out
 }
 
-/// Where Claude Code keeps transcripts on this machine: `~/.claude/projects`, plus,
-/// where WSL is installed, each WSL user's own (`\\wsl.localhost\<distro>\home\<user>\.claude\projects`),
-/// for Claude Code run inside WSL. Only folders that exist are added after the first.
-pub fn claude_roots(home: &Path) -> Vec<PathBuf> {
-    let mut roots = vec![home.join(".claude").join("projects")];
-    for distro in wsl_distros() {
-        let base = PathBuf::from(format!(r"\\wsl.localhost\{distro}"));
-        let homes: Vec<PathBuf> = std::fs::read_dir(base.join("home")).into_iter().flatten().flatten().map(|e| e.path()).chain([base.join("root")]).collect();
-        roots.extend(homes.into_iter().map(|h| h.join(".claude").join("projects")).filter(|p| p.is_dir()));
+/// scan_dir over one account's transcript folder, each file marked with the account.
+pub fn scan_root(root: &Root) -> Vec<ScannedFile> {
+    let mut files = scan_dir(&root.projects);
+    for f in &mut files {
+        f.account = root.account.clone();
     }
-    roots
+    files
+}
+
+/// Every transcript under `roots`. A folder listed twice is read once.
+pub fn scan_roots(roots: &[Root]) -> Vec<ScannedFile> {
+    let mut seen = std::collections::HashSet::new();
+    roots.iter().filter(|r| seen.insert(r.projects.clone())).flat_map(scan_root).collect()
+}
+
+/// One folder of transcripts read with no account: tests, and callers with a single folder.
+pub fn unassigned(root: &Path) -> Vec<Root> {
+    vec![Root { projects: root.to_path_buf(), account: String::new() }]
 }
 
 /// The WSL distros, from `wsl.exe -l -q`, without opening a console window.
 #[cfg(windows)]
-fn wsl_distros() -> Vec<String> {
+pub(crate) fn wsl_distros() -> Vec<String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     std::process::Command::new("wsl.exe")
@@ -95,7 +106,7 @@ fn wsl_distros() -> Vec<String> {
 
 /// No WSL here.
 #[cfg(not(windows))]
-fn wsl_distros() -> Vec<String> {
+pub(crate) fn wsl_distros() -> Vec<String> {
     Vec::new()
 }
 
@@ -146,9 +157,25 @@ mod tests {
     }
 
     #[test]
-    fn the_first_root_is_always_the_home_folders() {
-        let home = Path::new("/h");
-        assert_eq!(claude_roots(home)[0], home.join(".claude").join("projects"));
+    fn each_file_carries_its_folders_account_and_a_folder_listed_twice_is_read_once() {
+        let dir = std::env::temp_dir().join(format!("ci_scan_acct_{}", std::process::id()));
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        fs::create_dir_all(a.join("-p")).unwrap();
+        fs::create_dir_all(b.join("-p")).unwrap();
+        fs::write(a.join("-p").join("s1.jsonl"), "{}\n").unwrap();
+        fs::write(b.join("-p").join("s2.jsonl"), "{}\n").unwrap();
+        let roots = [
+            Root { projects: a.clone(), account: "acct:me:o1".into() },
+            Root { projects: b, account: "acct:me:acme".into() },
+            Root { projects: a, account: "acct:me:o1".into() },
+        ];
+        let mut found: Vec<(String, String)> = scan_roots(&roots)
+            .into_iter()
+            .map(|f| (f.path.file_name().unwrap().to_string_lossy().to_string(), f.account))
+            .collect();
+        found.sort();
+        assert_eq!(found, vec![("s1.jsonl".into(), "acct:me:o1".into()), ("s2.jsonl".into(), "acct:me:acme".into())]);
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

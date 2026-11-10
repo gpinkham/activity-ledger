@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   Filters, Totals, ByModel, ByTool, ByDay, ByProject, Workflow, PriceTable, RefreshSummary,
   SessionSummary, SessionDetail, ActivityReport, AppSettings, LabelProgress, TriggerStatus,
-  GaugeView, WorkSplit,
+  GaugeView, WorkSplit, Account, AccountSettings,
 } from "./types";
 import type { LabelSource } from "./labelSource";
 
@@ -32,10 +32,20 @@ export const getTriggers = () => invoke<TriggerStatus>("get_triggers");
 export const getGauge = () => invoke<GaugeView>("get_gauge");
 export const getGaugeSplit = () => invoke<WorkSplit>("get_gauge_split");
 export const openMainWindow = () => invoke<void>("open_main_window");
-export const weeklyReport = (weekStart: string, hideProjects: boolean) =>
-  invoke<string>("weekly_report", { weekStart, hideProjects });
+export const weeklyReport = (weekStart: string, hideProjects: boolean, account?: string | null) =>
+  invoke<string>("weekly_report", { weekStart, hideProjects, account: account ?? null });
 export const openWeeklyReport = () => invoke<void>("open_weekly_report");
 export const quitApp = () => invoke<void>("quit_app");
 export const fitPanel = (height: number) => invoke<void>("fit_panel", { height });
 export const setReportHideProjects = (hide: boolean) => invoke<AppSettings>("set_report_hide_projects", { hide });
 export const setAdapterEnabled = (name: string, enabled: boolean) => invoke<TriggerStatus>("set_adapter_enabled", { name, enabled });
+
+export const getAccounts = () => invoke<Account[]>("get_accounts");
+export const setAccountSettings = (id: string, settings: AccountSettings) =>
+  invoke<Account[]>("set_account_settings", { id, settings });
+/** Count a config folder in another account; null puts it back in its own login's. */
+export const setDirAccount = (dir: string, account: string | null) => invoke<Account[]>("set_dir_account", { dir, account });
+export const addConfigDir = (path: string) => invoke<Account[]>("add_config_dir", { path });
+export const removeConfigDir = (path: string) => invoke<Account[]>("remove_config_dir", { path });
+/** The account the menu bar ring follows; null is every account. */
+export const setTrayAccount = (account: string | null) => invoke<Account[]>("set_tray_account", { account });

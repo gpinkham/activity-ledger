@@ -6,6 +6,8 @@ import { useNav } from "../state/nav";
 import { ChartCard } from "../components/ChartCard";
 import { usd, compact } from "../lib/format";
 import type { SessionSummary } from "../lib/types";
+import { AccountChip, useAccounts } from "../components/Accounts";
+import { showAccountChips } from "../lib/accounts";
 
 type SortKey = "cost_usd" | "tokens" | "duration_secs" | "started_at";
 
@@ -25,6 +27,8 @@ export default function Sessions() {
   // When arriving from a Projects row, override the project filter.
   const effective = sessionsProject ? { ...filters, project: sessionsProject } : filters;
   const q = useQuery({ queryKey: ["sessions", effective], queryFn: () => getSessions(effective) });
+  const accounts = useAccounts();
+  const chips = showAccountChips(accounts.data, filters.account);
 
   const rows = useMemo(() => {
     const data = [...(q.data ?? [])];
@@ -76,7 +80,10 @@ export default function Sessions() {
               onClick={() => openSession(s.session_id)}
             >
               <td className="px-2 py-1">
-                <span className="text-ink">{s.title ?? shortId(s.session_id)}</span>
+                <span className="flex items-center gap-2">
+                  <span className="text-ink">{s.title ?? shortId(s.session_id)}</span>
+                  {chips && <AccountChip id={s.account} accounts={accounts.data} />}
+                </span>
               </td>
               <td className="px-2 py-1 font-mono text-xs text-muted">{s.project}</td>
               <td className="px-2 py-1 tabular-nums text-muted">{startedLabel(s.started_at)}</td>

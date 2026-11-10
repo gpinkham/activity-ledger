@@ -4,7 +4,7 @@ A desktop app that reads your Claude Code transcripts on your own machine and sh
 
 Activity Ledger is made by Pinkham Software. It is not made, endorsed or supported by Anthropic.
 
-**Everything stays on your machine.** The app reads `~/.claude/projects` and keeps its own cache in the app's data folder on this computer. It makes no network calls, except one optional call to a local model that you run yourself (see [Privacy](#privacy)).
+**Everything stays on your machine.** The app reads Claude Code's transcripts (`~/.claude/projects`, and those of any other Claude Code config folder, such as a second subscription's `~/.claude-work`) and keeps its own cache in the app's data folder on this computer. It makes no network calls, except one optional call to a local model that you run yourself (see [Privacy](#privacy)).
 
 Figures are estimates at Anthropic's published API list prices. They are not an invoice, and they are not your plan's usage.
 
@@ -28,13 +28,26 @@ In this run the overhead share is small: most wake-ups went on to do real work, 
 - **Cost and efficiency:** cost per model, cache hit rate, and the price table the estimates use. You can edit the prices.
 - **Cost by activity:** every session is cut into segments, one per prompt, and each segment gets a label. Cost, calls and tokens are totalled per label, per day, and split into work and overhead.
 - **Workflow, Projects, Sessions:** tool use, cost per project, and a drill down into each session.
-- **Weekly report:** one click saves a week (last week, or this week so far) as a Markdown file: totals against the week before, cost by day, model and project, and the five busiest sessions. It is written only when you ask, holds no prompt text, session titles or paths, and can letter projects ("Project A") instead of naming them. The tray's "Save weekly report" opens the same save in the main window.
-- **Export:** a JSON summary with hashed ids and no prompt text, saved to a file you choose.
-- **Menu bar budget** (optional, off by default): a ring in the menu bar for today's spend against a monthly budget, for anyone working to a company API budget. The budget is spread evenly over the calendar month, so a $300 budget in a 31 day month allows $9.68 a day; days start at local midnight. The ring is green below 80% of today's allowance, amber from 80% and red from 100% (both thresholds can be changed). A click opens today's spend, the month to date, the pace, the projected month end, what is left per day, and today's split between work and overhead. Set it up under Cost by activity, Menu bar budget. With it on, closing the main window keeps the app in the menu bar and out of the Dock.
+- **Accounts:** with more than one Claude subscription on the machine, every view can show one account or all of them (the picker in the header). With all of them, rows carry the account's colour and name, and the Overview splits the cost by account. See [Accounts](#accounts).
+- **Weekly report:** one click saves a week (last week, or this week so far) as a Markdown file: totals against the week before, cost by day, model and project, and the five busiest sessions. It covers the account picked in the header (or all of them, and then names them). It is written only when you ask, holds no prompt text, session titles or paths, and can letter projects ("Project A") and number accounts ("Account 1") instead of naming them. The tray's "Save weekly report" opens the same save in the main window, for the account the ring follows.
+- **Export:** a JSON summary with hashed ids (projects and accounts) and no prompt text, saved to a file you choose.
+- **Menu bar budget** (optional, off by default): a ring in the menu bar for today's spend against one account's monthly budget, for anyone working to a company API budget. Each account has its own budget and thresholds. The budget is spread evenly over the calendar month, so a $300 budget in a 31 day month allows $9.68 a day; days start at local midnight. The ring is green below 80% of today's allowance, amber from 80% and red from 100% (both thresholds can be changed). A click opens today's spend, the month to date, the pace, the projected month end, what is left per day, and today's split between work and overhead, with a switcher at the top to follow another account. "All accounts" there shows their spend together, with no ring: there is no budget to measure it against. Turn the ring on, and pick the account it follows, under Cost by activity, Menu bar budget; set each account's budget under Cost by activity, Accounts. With it on, closing the main window keeps the app in the menu bar and out of the Dock.
 
   The figures are the day view's figures for the same calls, read every 60 seconds from what the transcripts gained since the last read. Both count this Mac's local days. Web searches are priced at $10 per 1,000 here, in the day view and in Cost by activity alike. Every figure is an estimate for this Mac's Claude Code only: not chat, not other machines, and not your invoice. If Claude Code's managed `modelPricing` setting is in `/Library/Application Support/ClaudeCode/managed-settings.json`, its rates are used and the panel says "at configured rates"; otherwise "at list price".
 
   Clicking the icon while the panel is open hides it on focus loss and the same click may open it again; close it by clicking elsewhere.
+
+## Accounts
+
+Claude Code keeps one config folder per login: `~/.claude` by default, or the folder `CLAUDE_CONFIG_DIR` names. A second subscription, for example a work one, is often run as `CLAUDE_CONFIG_DIR=~/.claude-work claude`. Activity Ledger reads every one of them:
+
+- **Found by itself:** every folder in your home named `.claude`, `.claude-*` or `.claude_*` that holds a `projects` folder. On Windows the home folder of each WSL user is searched too.
+- **Grouped by login:** each folder's account is read from the `oauthAccount` block of its `.claude.json` (for `~/.claude`, the `~/.claude.json` beside it): the account and organisation ids, the organisation's name and kind, and the email. Folders signed in to the same account and organisation are one account, so a Windows `~/.claude` and a WSL `~/.claude` signed in to the same plan count together. The same person in another organisation is another account. A folder with no login is an account of its own, named after the folder.
+- **Named for you:** an organisation's name ("Acme"), or "Personal" for a Pro or Max plan, with the plan beside it. Each account gets its own colour.
+- **Set per account** (Cost by activity, Accounts): its name, colour, monthly budget and thresholds, and whether it is hidden. A hidden account leaves the picker and every "All accounts" figure. Each config folder can be counted in another account, or split into one of its own. A folder outside your home can be added by hand. Refresh looks for new folders.
+- **Set for the whole app:** everything else, for example the local model, the price table, the harness adapters, the report's hide setting, and whether the ring shows in the menu bar.
+
+The transcripts do not say which login wrote them. A folder signed out and back in as someone else counts all its history in the login it has now; move it in the Accounts card if that is wrong.
 
 ## How labels work
 
@@ -63,12 +76,13 @@ The app asks the model for a JSON answer limited to the label list (Ollama's str
 
 ## Privacy
 
-- The app reads Claude Code's transcripts in `~/.claude/projects` on this machine. It never changes them.
+- The app reads Claude Code's transcripts in `~/.claude/projects` (and each other config folder's `projects`) on this machine. It never changes them.
+- To tell accounts apart it reads the `oauthAccount` block of each config folder's `.claude.json`: the account and organisation ids, the organisation's name and kind, and the email, shown only in the app. It never opens Claude Code's credentials file. The cache keeps the account id of each record; an export hashes it.
 - Its cache (a SQLite file in the app's data folder) keeps counts, token totals, costs, timestamps, tool names, labels, model names, the Claude Code version, git branch names, message and tool call ids, the session titles Claude Code wrote, and the project folder and transcript file each record came from. With a harness adapter on, it also keeps each harness prompt's trigger label and the message ids the prompt named. It does not keep your prompts, Claude's replies, tool inputs or commands. Tool inputs are read in memory only to decide a tag such as "test run".
 - The only network call is the optional labelling pass, to your Ollama. By default it must be on this machine (a loopback address). A remote host is used only if you tick "Allow a remote Ollama". For each segment it sends tool counts and a short excerpt of the opening prompt. Only the label that comes back is kept.
 - The trigger file holds phrases and paths only. With an adapter on, the app reads that harness's log on this machine to pick a label (a standup, a scheduled job). It keeps the label and the ids of the messages a prompt named, nothing else from the log.
 - The menu bar budget reads the same transcripts, and Claude Code's managed settings file for `modelPricing` only. It changes neither.
-- No telemetry, no accounts, no calls to Anthropic or anyone else.
+- No telemetry, no sign-in to Activity Ledger, no calls to Anthropic or anyone else.
 
 ![Local model settings](docs/screenshots/privacy-settings.png)
 
@@ -124,7 +138,7 @@ WebView2 is already part of Windows 10 and 11. Keep the repository on a Windows 
 
 **What is different on Windows:**
 
-- Transcripts are read from `%USERPROFILE%\.claude\projects` and, for Claude Code run inside WSL, from each WSL user's `~/.claude/projects` in each distro (found with `wsl.exe -l -q`; Docker Desktop's distros are skipped). Reading a distro that is not running starts it. Press **Refresh** to read what is new.
+- Transcripts are read from `%USERPROFILE%\.claude\projects` and, for Claude Code run inside WSL, from each WSL user's config folders in each distro (`~/.claude`, `~/.claude-work` and the like; distros found with `wsl.exe -l -q`, Docker Desktop's skipped). Reading a distro that is not running starts it. Press **Refresh** to read what is new. The accounts card says where each folder was found ("Windows", "WSL · Ubuntu").
 - The budget ring sits in the system tray, and its panel opens above the taskbar. Windows 11 puts a new tray icon in the overflow (the **^** next to the clock); drag it out to keep it in view.
 - Claude Code's managed `modelPricing` is read from `C:\Program Files\ClaudeCode\managed-settings.json`.
 - The main window opens maximized (`src-tauri/tauri.windows.conf.json`).
@@ -143,7 +157,7 @@ npm run test:ui
 npx tsc --noEmit
 ```
 
-186 Rust tests and 36 front-end tests; on Windows the 4 tests of the macOS signing script are skipped. The weekly report's expected output is checked in at `src-tauri/tests/fixtures/weekly-report.golden.md`; after a deliberate change, rewrite it with `UPDATE_GOLDEN=1 cargo test report::` and read the diff.
+196 Rust tests and 42 front-end tests; on Windows the 4 tests of the macOS signing script are skipped. The weekly report's expected output is checked in at `src-tauri/tests/fixtures/weekly-report.golden.md`; after a deliberate change, rewrite it with `UPDATE_GOLDEN=1 cargo test report::` and read the diff.
 
 ## License
 

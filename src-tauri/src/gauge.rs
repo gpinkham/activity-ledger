@@ -12,7 +12,7 @@ use crate::budget::first_of_month;
 use crate::models::MessageRecord;
 use crate::parser::parse_str;
 use crate::pricing::{long_key, GaugePrices, PriceTable, TokenBreakdown};
-use crate::scanner::scan_dir;
+use crate::scanner::{scan_roots, unassigned, Root};
 use chrono::{DateTime, Local, NaiveDate, TimeZone, Utc};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
@@ -105,6 +105,8 @@ struct FileState {
     /// the line the last poll ended on changes them.
     tail: Vec<u8>,
     keys: HashSet<String>,
+    /// The Claude account its folder belongs to.
+    account: String,
 }
 
 const HEAD: usize = 4096;
@@ -188,22 +190,26 @@ impl Tally {
     /// Read what changed under `root` since the last poll. Only files written this
     /// local month are looked at: an older file holds only older calls.
     pub fn poll(&mut self, root: &Path, clock: &dyn Clock) -> PollStats {
-        self.poll_roots(&[root.to_path_buf()], clock)
+        self.poll_roots(&unassigned(root), clock)
     }
 
     /// poll, over every transcript folder at once (a file gone from all of them is forgotten).
-    pub fn poll_roots(&mut self, roots: &[PathBuf], clock: &dyn Clock) -> PollStats {
+    pub fn poll_roots(&mut self, roots: &[Root], clock: &dyn Clock) -> PollStats {
         let month_start = first_of_month(clock.today());
         let since = clock.start_of(month_start).timestamp();
         let mut stats = PollStats::default();
         let mut live: HashSet<PathBuf> = HashSet::new();
-        for sf in roots.iter().flat_map(|r| scan_dir(r)) {
+        for sf in scan_roots(roots) {
             if sf.mtime < since {
                 continue;
             }
             stats.files_seen += 1;
             live.insert(sf.path.clone());
             self.read_file(&sf.path, &sf.project, clock, &mut stats);
+            // A folder moved to another account keeps what was read; only the label changes.
+            if let Some(st) = self.files.get_mut(&sf.path) {
+                st.account = sf.account;
+            }
         }
         let gone: Vec<PathBuf> = self.files.keys().filter(|p| !live.contains(*p)).cloned().collect();
         for p in gone {
@@ -245,7 +251,7 @@ impl Tally {
                 stats.reread += 1;
             }
             self.forget_file(path);
-            self.files.insert(path.to_path_buf(), FileState { id, size: 0, mtime: 0, offset: 0, head: Vec::new(), tail: Vec::new(), keys: HashSet::new() });
+            self.files.insert(path.to_path_buf(), FileState { id, size: 0, mtime: 0, offset: 0, head: Vec::new(), tail: Vec::new(), keys: HashSet::new(), account: String::new() });
             0
         };
         let mut buf = Vec::new();
@@ -290,17 +296,26 @@ impl Tally {
 
     /// Today's and this month's cost, priced the way the day view prices a day.
     pub fn spend(&self, prices: &GaugePrices, clock: &dyn Clock) -> Spend {
+        self.spend_in(prices, clock, |_| true)
+    }
+
+    /// spend, for the calls of the accounts `keep` takes. A call counts in the
+    /// account of the copy that counts.
+    pub fn spend_in(&self, prices: &GaugePrices, clock: &dyn Clock, keep: impl Fn(&str) -> bool) -> Spend {
         let today = clock.today();
         let month_start = first_of_month(today);
         let mut sums: BTreeMap<(NaiveDate, String), TokenBreakdown> = BTreeMap::new();
         for copies in self.calls.values() {
             // The newest file's copy, to the second; a tie goes to the first path.
-            let Some((_, c)) = copies.iter().min_by(|(a, _), (b, _)| {
+            let Some((path, c)) = copies.iter().min_by(|(a, _), (b, _)| {
                 let mtime = |p: &PathBuf| self.files.get(p).map_or(0, |f| f.mtime);
                 mtime(b).cmp(&mtime(a)).then_with(|| a.cmp(b))
             }) else {
                 continue;
             };
+            if !keep(self.files.get(path).map_or("", |f| f.account.as_str())) {
+                continue;
+            }
             let Some(day) = c.day else { continue };
             if day < month_start || day > today {
                 continue;

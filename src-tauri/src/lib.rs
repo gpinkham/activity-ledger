@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod accounts;
 pub mod activity;
 pub mod budget;
 pub mod exporter;
@@ -33,10 +34,18 @@ pub fn run() {
             let db_path = data_dir.join("activity-ledger.sqlite");
             let mut store = store::Store::open(&db_path).expect("open db");
             let home = dirs::home_dir().expect("home dir");
-            let claude_roots = scanner::claude_roots(&home);
             let price_path = data_dir.join("prices.json");
             let settings_path = data_dir.join("settings.json");
-            let settings = settings::AppSettings::load_or_default(&settings_path);
+            let mut settings = settings::AppSettings::load_or_default(&settings_path);
+            let discovery = accounts::Discovery::scan(&home, &settings);
+            // A budget saved before accounts goes to the account of this machine's own
+            // ~/.claude, where the old figures were mostly read from.
+            let first = discovery.roots().into_iter().next().map(|r| r.account);
+            if let Some(first) = first {
+                if settings.migrate_budget(&first) {
+                    let _ = settings.save(&settings_path);
+                }
+            }
             let triggers_path = data_dir.join("triggers.json");
             let (triggers, triggers_error) = triggers::TriggerConfig::load_or_default(&triggers_path);
             // Standups and scheduled jobs are known from the first view, before any Refresh.
@@ -44,7 +53,7 @@ pub fn run() {
             app.manage(AppState {
                 store: Mutex::new(store),
                 price: Mutex::new(PriceTable::load_or_seed(&price_path)),
-                claude_roots,
+                discovery: Mutex::new(discovery),
                 settings: Mutex::new(settings),
                 price_path,
                 settings_path,
@@ -100,6 +109,12 @@ pub fn run() {
             commands::weekly_report,
             commands::set_report_hide_projects,
             commands::open_weekly_report,
+            commands::get_accounts,
+            commands::set_account_settings,
+            commands::set_dir_account,
+            commands::add_config_dir,
+            commands::remove_config_dir,
+            commands::set_tray_account,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

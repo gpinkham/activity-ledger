@@ -1,13 +1,20 @@
 // The menu bar gauge's panel, opened from the ring in the menu bar. Presentation
 // only: TrayApp loads the figures. Every figure is an estimate and says so.
 import type { GaugeView, WorkSplit } from "../lib/types";
-import { money, paceLine, rateNote, remainingLine, ringClass, ringWord, splitShares, words } from "../lib/gauge";
+import { money, paceLine, rateNote, remainingLine, ringClass, ringWord, splitShares } from "../lib/gauge";
+
+/** An account the panel can switch the ring to. */
+export interface PanelAccount { id: string; label: string; colour: string }
 
 export interface TrayPanelProps {
   view: GaugeView | null;
   /** null while it is being worked out. */
   split: WorkSplit | null;
   error?: string | null;
+  /** The accounts to switch between; the switcher shows with two or more. */
+  accounts?: PanelAccount[];
+  /** Follow another account, or (null) every account. */
+  onPickAccount?: (id: string | null) => void;
   onOpen: () => void;
   /** Opens the main window's weekly report save flow. The panel writes nothing. */
   onSaveReport?: () => void;
@@ -48,7 +55,26 @@ function Row({ label, value, className = "" }: { label: string; value: string; c
   );
 }
 
-export function TrayPanel({ view, split, error, onOpen, onSaveReport, onQuit }: TrayPanelProps) {
+/** Which account the ring follows, and a way to follow another. */
+function Switcher({ view, accounts, onPickAccount }: Pick<TrayPanelProps, "accounts" | "onPickAccount"> & { view: GaugeView }) {
+  const current = view.account ?? null;
+  const colour = accounts?.find((a) => a.id === current)?.colour ?? "#8E8E93";
+  if (!accounts || accounts.length < 2 || !onPickAccount) {
+    return view.account_label ? <div className="text-xs text-muted" data-account-label>{view.account_label}</div> : null;
+  }
+  return (
+    <label className="flex items-center gap-2 text-xs text-muted">
+      <span aria-hidden className="inline-block h-2 w-2 rounded-full" style={{ background: colour }} />
+      <select aria-label="Account" data-switcher value={current ?? ""} onChange={(e) => onPickAccount(e.target.value || null)}
+        className="flex-1 border border-line rounded-md px-1.5 py-0.5 bg-surface text-ink">
+        <option value="">All accounts</option>
+        {accounts.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
+      </select>
+    </label>
+  );
+}
+
+export function TrayPanel({ view, split, error, accounts, onPickAccount, onOpen, onSaveReport, onQuit }: TrayPanelProps) {
   if (!view) {
     return (
       <div className="p-4 text-sm text-muted flex flex-col gap-2" data-state="loading">
@@ -62,6 +88,7 @@ export function TrayPanel({ view, split, error, onOpen, onSaveReport, onQuit }: 
   const shares = split ? splitShares(split.work_usd, split.overhead_usd) : null;
   return (
     <div className="p-4 text-sm flex flex-col gap-2" data-state={b.ring}>
+      <Switcher view={view} accounts={accounts} onPickAccount={onPickAccount} />
       <div>
         <div className="text-xs text-muted">Today</div>
         <div className="text-2xl font-semibold text-ink tabular-nums">
@@ -84,7 +111,13 @@ export function TrayPanel({ view, split, error, onOpen, onSaveReport, onQuit }: 
           value={split === null ? "working it out…" : shares ? `${shares.work}% / ${shares.overhead}%` : "no calls yet"} />
       </div>
 
-      {!set && <p className="text-xs text-muted">Set a monthly budget in Activity Ledger, under Cost by activity, {words.Bar} budget.</p>}
+      {!set && (
+        <p className="text-xs text-muted" data-no-budget>
+          {view.account
+            ? "Set this account's monthly budget in Activity Ledger, under Cost by activity, Accounts."
+            : "Every account together. Budgets are per account: pick one to see its ring."}
+        </p>
+      )}
       {error && <p className="text-xs text-red-500">{error}</p>}
       <p className="text-xs text-muted" data-note>{rateNote(view.rate_source)}</p>
 

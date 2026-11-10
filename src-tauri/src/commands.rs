@@ -1,3 +1,4 @@
+use crate::accounts::{Account, Discovery, Root};
 use crate::activity::{ActivityReport, LabelSource};
 use crate::budget::{self, BudgetView, Thresholds};
 use crate::gauge::{iso, Clock, SystemClock, Tally};
@@ -6,9 +7,9 @@ use crate::labeller::{self, LabelProgress};
 use crate::metrics::{ByDay, ByModel, ByProject, ByTool, Filters, Totals, Workflow};
 use crate::parser::parse_with;
 use crate::pricing::{GaugePrices, ManagedPricing, PriceTable, RateSource};
-use crate::scanner::scan_dir;
+use crate::scanner::{scan_roots, unassigned};
 use crate::sessions::{SessionDetail, SessionSummary};
-use crate::settings::AppSettings;
+use crate::settings::{AccountSettings, AppSettings};
 use crate::store::Store;
 use crate::triggers::{Matcher, TriggerConfig};
 use serde::Serialize;
@@ -19,8 +20,9 @@ use std::sync::{Arc, Mutex};
 pub struct AppState {
     pub store: Mutex<Store>,
     pub price: Mutex<PriceTable>,
-    /// Every folder Claude Code writes transcripts to (scanner::claude_roots).
-    pub claude_roots: Vec<PathBuf>,
+    /// Every Claude config folder found, and the account each belongs to (accounts.rs).
+    /// Looked for again on Refresh and when an account setting changes.
+    pub discovery: Mutex<Discovery>,
     pub settings: Mutex<AppSettings>,
     pub price_path: PathBuf,
     pub settings_path: PathBuf,
@@ -112,17 +114,19 @@ pub fn do_refresh(store: &mut Store, root: &Path) -> rusqlite::Result<RefreshSum
 /// do_refresh with a harness trigger file's parse settings. When they changed
 /// since the cache was read, every transcript is read again.
 pub fn do_refresh_with(store: &mut Store, root: &Path, matcher: &Matcher) -> rusqlite::Result<RefreshSummary> {
-    do_refresh_roots(store, &[root.to_path_buf()], matcher)
+    do_refresh_roots(store, &unassigned(root), matcher)
 }
 
-/// do_refresh_with, over every transcript folder.
-pub fn do_refresh_roots(store: &mut Store, roots: &[PathBuf], matcher: &Matcher) -> rusqlite::Result<RefreshSummary> {
+/// do_refresh_with, over every account's transcript folders. An unchanged file
+/// whose folder now counts in another account is moved there without a re-read.
+pub fn do_refresh_roots(store: &mut Store, roots: &[Root], matcher: &Matcher) -> rusqlite::Result<RefreshSummary> {
     store.use_triggers(&matcher.fingerprint())?;
-    let scanned: Vec<_> = roots.iter().flat_map(|r| scan_dir(r)).collect();
+    let scanned = scan_roots(roots);
     let mut parsed_count = 0;
     for sf in &scanned {
         let path = sf.path.to_string_lossy().to_string();
         if !store.needs_parse(&path, sf.size, sf.mtime) {
+            store.reassign(&path, &sf.account)?;
             continue;
         }
         let content = match std::fs::read_to_string(&sf.path) {
@@ -137,18 +141,49 @@ pub fn do_refresh_roots(store: &mut Store, roots: &[PathBuf], matcher: &Matcher)
     Ok(RefreshSummary { files_scanned: scanned.len(), files_parsed: parsed_count })
 }
 
-#[tauri::command]
-pub fn refresh(state: tauri::State<AppState>) -> Result<RefreshSummary, String> {
-    let (config, _) = reload_triggers(&state)?;
+/// The transcript folders to read, each with its account.
+pub fn roots(state: &AppState) -> Result<Vec<Root>, String> {
+    Ok(state.discovery.lock().map_err(|e| e.to_string())?.roots())
+}
+
+/// Look for config folders again, with the account settings as they are now.
+pub fn rediscover(state: &AppState) -> Result<(), String> {
+    let Some(home) = state.home.as_deref() else { return Ok(()) };
+    let settings = state.settings.lock().map_err(|e| e.to_string())?.clone();
+    *state.discovery.lock().map_err(|e| e.to_string())? = Discovery::scan(home, &settings);
+    Ok(())
+}
+
+/// `f`, with the hidden accounts left out when it asks for every account.
+pub fn scoped(state: &AppState, mut f: Filters) -> Result<Filters, String> {
+    if f.account.is_none() {
+        let settings = state.settings.lock().map_err(|e| e.to_string())?;
+        f.exclude_accounts = settings.accounts.iter().filter(|(_, a)| a.hidden).map(|(id, _)| id.clone()).collect();
+    }
+    Ok(f)
+}
+
+/// Bring the cache up to date with every account's transcripts.
+fn refresh_store(state: &AppState) -> Result<RefreshSummary, String> {
+    let (config, _) = reload_triggers(state)?;
+    let roots = roots(state)?;
     let mut store = state.store.lock().map_err(|e| e.to_string())?;
     store.sender_labels = config.sender_labels(state.home.as_deref());
-    do_refresh_roots(&mut store, &state.claude_roots, &config.matcher(state.home.as_deref())).map_err(|e| e.to_string())
+    do_refresh_roots(&mut store, &roots, &config.matcher(state.home.as_deref())).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn refresh(state: tauri::State<AppState>) -> Result<RefreshSummary, String> {
+    // A folder made since the last look (a new CLAUDE_CONFIG_DIR) is found here.
+    rediscover(&state)?;
+    refresh_store(&state)
 }
 
 macro_rules! metric_cmd {
     ($name:ident, $ret:ty, $call:ident) => {
         #[tauri::command]
         pub fn $name(state: tauri::State<AppState>, filters: Filters) -> Result<$ret, String> {
+            let filters = scoped(&state, filters)?;
             let store = state.store.lock().map_err(|e| e.to_string())?;
             let price = state.price.lock().map_err(|e| e.to_string())?;
             store.$call(&price, &filters).map_err(|e| e.to_string())
@@ -163,14 +198,117 @@ metric_cmd!(get_by_project, Vec<ByProject>, by_project);
 
 #[tauri::command]
 pub fn get_by_tool(state: tauri::State<AppState>, filters: Filters) -> Result<Vec<ByTool>, String> {
+    let filters = scoped(&state, filters)?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
     store.by_tool(&filters).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn get_workflow(state: tauri::State<AppState>, filters: Filters) -> Result<Workflow, String> {
+    let filters = scoped(&state, filters)?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
     store.workflow(&filters).map_err(|e| e.to_string())
+}
+
+/// Every account found, hidden ones included (the settings card lists them).
+#[tauri::command]
+pub fn get_accounts(state: tauri::State<AppState>) -> Result<Vec<Account>, String> {
+    accounts(&state)
+}
+
+pub fn accounts(state: &AppState) -> Result<Vec<Account>, String> {
+    let settings = state.settings.lock().map_err(|e| e.to_string())?.clone();
+    Ok(state.discovery.lock().map_err(|e| e.to_string())?.accounts(&settings))
+}
+
+/// What a settings change needs done to the folders found.
+#[derive(PartialEq)]
+enum Folders {
+    /// A name, colour or budget: nothing.
+    Same,
+    /// A folder moved between accounts: the same folders, counted again, and the
+    /// cache's rows moved with them.
+    Reassign,
+    /// A folder added or removed: look again, and read what is new.
+    Rescan,
+}
+
+/// Change the settings with `edit`, save them, and bring the folders up to date.
+fn edit_settings(app: &tauri::AppHandle, state: &AppState, folders: Folders, edit: impl FnOnce(&mut AppSettings)) -> Result<Vec<Account>, String> {
+    let next = {
+        let mut settings = state.settings.lock().map_err(|e| e.to_string())?;
+        let mut next = settings.clone();
+        edit(&mut next);
+        next.save(&state.settings_path).map_err(|e| e.to_string())?;
+        *settings = next.clone();
+        next
+    };
+    match folders {
+        Folders::Same => {}
+        Folders::Reassign => {
+            let mut d = state.discovery.lock().map_err(|e| e.to_string())?;
+            *d = Discovery::new(d.dirs.clone(), &next);
+        }
+        Folders::Rescan => rediscover(state)?,
+    }
+    if folders != Folders::Same {
+        refresh_store(state)?;
+        // The gauge's tally keeps what it read; its next poll relabels the files.
+    }
+    crate::tray::refresh_icon(app);
+    accounts(state)
+}
+
+/// Save one account's name, colour, hidden flag and budget. Only that account's
+/// entry is written, so a change made elsewhere is not undone.
+#[tauri::command]
+pub fn set_account_settings(app: tauri::AppHandle, state: tauri::State<AppState>, id: String, settings: AccountSettings) -> Result<Vec<Account>, String> {
+    edit_settings(&app, &state, Folders::Same, |s| {
+        let mut settings = settings;
+        settings.label = settings.label.filter(|l| !l.trim().is_empty());
+        s.accounts.insert(id, settings);
+    })
+}
+
+/// Count a config folder in another account, or (none) in the one its login gives it.
+#[tauri::command]
+pub fn set_dir_account(app: tauri::AppHandle, state: tauri::State<AppState>, dir: String, account: Option<String>) -> Result<Vec<Account>, String> {
+    edit_settings(&app, &state, Folders::Reassign, |s| match account {
+        Some(a) => {
+            s.dir_accounts.insert(dir, a);
+        }
+        None => {
+            s.dir_accounts.remove(&dir);
+        }
+    })
+}
+
+/// Read a config folder that was not found on its own (a `CLAUDE_CONFIG_DIR`
+/// outside the home folder). Refused unless it holds a `projects` folder.
+#[tauri::command]
+pub fn add_config_dir(app: tauri::AppHandle, state: tauri::State<AppState>, path: String) -> Result<Vec<Account>, String> {
+    let dir = crate::accounts::custom_dir(&path)
+        .ok_or_else(|| format!("{path} has no projects folder: not a Claude Code config folder"))?;
+    let key = dir.key();
+    edit_settings(&app, &state, Folders::Rescan, |s| {
+        if !s.extra_config_dirs.contains(&key) {
+            s.extra_config_dirs.push(key);
+        }
+    })
+}
+
+#[tauri::command]
+pub fn remove_config_dir(app: tauri::AppHandle, state: tauri::State<AppState>, path: String) -> Result<Vec<Account>, String> {
+    edit_settings(&app, &state, Folders::Rescan, |s| {
+        s.extra_config_dirs.retain(|p| *p != path);
+        s.dir_accounts.remove(&path);
+    })
+}
+
+/// The account the menu bar ring follows; none is every account.
+#[tauri::command]
+pub fn set_tray_account(app: tauri::AppHandle, state: tauri::State<AppState>, account: Option<String>) -> Result<Vec<Account>, String> {
+    edit_settings(&app, &state, Folders::Same, |s| s.tray_account = account)
 }
 
 #[tauri::command]
@@ -189,6 +327,7 @@ pub fn set_price_table(state: tauri::State<AppState>, table: PriceTable) -> Resu
 
 #[tauri::command]
 pub fn get_activity(state: tauri::State<AppState>, filters: Filters, label_source: Option<LabelSource>) -> Result<ActivityReport, String> {
+    let filters = scoped(&state, filters)?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
     let price = state.price.lock().map_err(|e| e.to_string())?;
     let settings = state.settings.lock().map_err(|e| e.to_string())?;
@@ -200,6 +339,7 @@ pub fn get_activity(state: tauri::State<AppState>, filters: Filters, label_sourc
 #[tauri::command]
 pub fn run_model_labels(app: tauri::AppHandle, state: tauri::State<AppState>, filters: Filters) -> Result<(), String> {
     use tauri::Manager;
+    let filters = scoped(&state, filters)?;
     let settings = state.settings.lock().map_err(|e| e.to_string())?.clone();
     let mut endpoint = labeller::prepare(&settings)?;
     {
@@ -247,12 +387,32 @@ pub fn get_settings(state: tauri::State<AppState>) -> Result<AppSettings, String
 
 #[tauri::command]
 pub fn set_settings(app: tauri::AppHandle, state: tauri::State<AppState>, settings: AppSettings) -> Result<(), String> {
-    settings.save(&state.settings_path).map_err(|e| e.to_string())?;
-    *state.settings.lock().map_err(|e| e.to_string())? = settings;
+    {
+        let mut current = state.settings.lock().map_err(|e| e.to_string())?;
+        let next = with_accounts_of(settings, &current);
+        next.save(&state.settings_path).map_err(|e| e.to_string())?;
+        *current = next;
+    }
     // The menu bar icon follows "Show in menu bar"; a new budget redraws the ring.
     crate::tray::sync(&app).map_err(|e| e.to_string())?;
     crate::tray::refresh_icon(&app);
     Ok(())
+}
+
+/// `incoming` with the account settings kept from `current`. Those have commands of
+/// their own (set_account_settings and the rest); a card's whole-settings save
+/// carries an older copy of them and must not undo a change made since.
+pub fn with_accounts_of(incoming: AppSettings, current: &AppSettings) -> AppSettings {
+    AppSettings {
+        accounts: current.accounts.clone(),
+        extra_config_dirs: current.extra_config_dirs.clone(),
+        dir_accounts: current.dir_accounts.clone(),
+        tray_account: current.tray_account.clone(),
+        monthly_budget_usd: current.monthly_budget_usd,
+        amber_pct: current.amber_pct,
+        red_pct: current.red_pct,
+        ..incoming
+    }
 }
 
 /// Change only the weekly report's hide setting. The report button must not write back
@@ -280,25 +440,56 @@ pub struct GaugeView {
     pub budget: BudgetView,
     /// "configured" when Claude Code's managed modelPricing priced it, else "list".
     pub rate_source: RateSource,
+    /// The account the ring follows; none is every account (shown hidden ones aside).
+    pub account: Option<String>,
+    /// That account's name, for the panel and the tooltip.
+    pub account_label: Option<String>,
 }
 
-/// Read what the transcripts gained (when `poll`), then price today and the month.
+/// Read what the transcripts gained (when `poll`), then price today and the month,
+/// for the account the ring follows (settings' `tray_account`).
 pub fn gauge_view(state: &AppState, clock: &dyn Clock, poll: bool) -> Result<GaugeView, String> {
+    let account = state.settings.lock().map_err(|e| e.to_string())?.tray_account.clone();
+    gauge_view_for(state, clock, poll, account.as_deref())
+}
+
+/// gauge_view for `account`. Every account together has no budget, so no ring:
+/// each account's budget is its own.
+pub fn gauge_view_for(state: &AppState, clock: &dyn Clock, poll: bool, account: Option<&str>) -> Result<GaugeView, String> {
     let settings = state.settings.lock().map_err(|e| e.to_string())?.clone();
     let prices = GaugePrices {
         table: state.price.lock().map_err(|e| e.to_string())?.clone(),
         managed: ManagedPricing::load(&state.managed_settings),
     };
-    let mut tally = state.gauge.lock().map_err(|e| e.to_string())?;
-    if poll {
-        tally.poll_roots(&state.claude_roots, clock);
-    }
-    let spend = tally.spend(&prices, clock);
-    let t = Thresholds { amber: settings.amber_pct / 100.0, red: settings.red_pct / 100.0 };
+    let roots = if poll { roots(state)? } else { Vec::new() };
+    let hidden = scoped(state, Filters::default())?.exclude_accounts;
+    let spend = {
+        let mut tally = state.gauge.lock().map_err(|e| e.to_string())?;
+        if poll {
+            tally.poll_roots(&roots, clock);
+        }
+        tally.spend_in(&prices, clock, |a| match account {
+            Some(want) => a == want,
+            None => !hidden.iter().any(|h| h == a),
+        })
+    };
+    let (monthly, t) = match account {
+        Some(id) => {
+            let a = settings.account(id);
+            (a.monthly_budget_usd, Thresholds { amber: a.amber_pct / 100.0, red: a.red_pct / 100.0 })
+        }
+        None => (0.0, Thresholds::default()),
+    };
+    let account_label = match account {
+        Some(id) => accounts(state)?.into_iter().find(|a| a.id == id).map(|a| a.label),
+        None => None,
+    };
     Ok(GaugeView {
         day: spend.day.to_string(),
-        budget: budget::view(settings.monthly_budget_usd, spend.day, spend.today, spend.month_to_date, t),
+        budget: budget::view(monthly, spend.day, spend.today, spend.month_to_date, t),
         rate_source: prices.source(),
+        account: account.map(str::to_string),
+        account_label,
     })
 }
 
@@ -318,16 +509,16 @@ pub struct WorkSplit {
 /// The split for one local day: the cache is brought up to date, then read for
 /// the instants the day spans.
 pub fn work_split(state: &AppState, clock: &dyn Clock) -> Result<WorkSplit, String> {
-    let (config, _) = reload_triggers(state)?;
-    let mut store = state.store.lock().map_err(|e| e.to_string())?;
-    store.sender_labels = config.sender_labels(state.home.as_deref());
-    do_refresh_roots(&mut store, &state.claude_roots, &config.matcher(state.home.as_deref())).map_err(|e| e.to_string())?;
+    refresh_store(state)?;
     let today = clock.today();
-    let f = Filters {
+    let account = state.settings.lock().map_err(|e| e.to_string())?.tray_account.clone();
+    let f = scoped(state, Filters {
         from_ts: Some(iso(clock.start_of(today))),
         to_ts: Some(iso(clock.start_of(today.succ_opt().unwrap_or(today)))),
+        account,
         ..Default::default()
-    };
+    })?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
     let price = state.price.lock().map_err(|e| e.to_string())?;
     let settings = state.settings.lock().map_err(|e| e.to_string())?;
     let report = store.activity_by(&price, &f, &settings, LabelSource::Rule).map_err(|e| e.to_string())?;
@@ -366,6 +557,7 @@ pub fn quit_app(app: tauri::AppHandle) {
 
 #[tauri::command]
 pub fn get_sessions(state: tauri::State<AppState>, filters: Filters) -> Result<Vec<SessionSummary>, String> {
+    let filters = scoped(&state, filters)?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
     let price = state.price.lock().map_err(|e| e.to_string())?;
     store.get_sessions(&price, &filters).map_err(|e| e.to_string())
@@ -380,6 +572,7 @@ pub fn get_session_detail(state: tauri::State<AppState>, session_id: String) -> 
 
 #[tauri::command]
 pub fn export_bundle(state: tauri::State<AppState>, filters: Filters) -> Result<String, String> {
+    let filters = scoped(&state, filters)?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
     let price = state.price.lock().map_err(|e| e.to_string())?;
     let generated_at = chrono::Utc::now().format("%Y-%m-%d").to_string();
@@ -390,21 +583,35 @@ pub fn export_bundle(state: tauri::State<AppState>, filters: Filters) -> Result<
 /// The weekly report for the local week starting on `week_start` (a Monday,
 /// `YYYY-MM-DD`), as Markdown. The front end saves it through `save_export`.
 #[tauri::command]
-pub fn weekly_report(state: tauri::State<AppState>, week_start: String, hide_projects: bool) -> Result<String, String> {
+pub fn weekly_report(state: tauri::State<AppState>, week_start: String, hide_projects: bool, account: Option<String>) -> Result<String, String> {
     let monday = crate::report::parse_week_start(&week_start)?;
+    let scope = report_scope(&state, account)?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
     let price = state.price.lock().map_err(|e| e.to_string())?;
     let written = chrono::Local::now().format("%-d %b %Y at %H:%M").to_string();
-    crate::report::build_report(&store, &price, &SystemClock, monday, hide_projects, &written).map_err(|e| e.to_string())
+    crate::report::build_report(&store, &price, &SystemClock, monday, hide_projects, &scope, &written).map_err(|e| e.to_string())
+}
+
+/// The report's accounts: `account`, or every account not hidden, with their names.
+pub fn report_scope(state: &AppState, account: Option<String>) -> Result<crate::report::Scope, String> {
+    let exclude = scoped(state, Filters::default())?.exclude_accounts;
+    let labels = accounts(state)?
+        .into_iter()
+        .filter(|a| account.as_ref() == Some(&a.id) || (account.is_none() && !exclude.contains(&a.id)))
+        .map(|a| (a.id, a.label))
+        .collect();
+    Ok(crate::report::Scope { account, labels, exclude })
 }
 
 /// The tray's "Save weekly report": bring up the main window and ask it to start
-/// its save flow. The tray itself writes nothing.
+/// its save flow, for the account the ring follows (none: every account). The tray
+/// itself writes nothing.
 #[tauri::command]
-pub fn open_weekly_report(app: tauri::AppHandle) {
+pub fn open_weekly_report(app: tauri::AppHandle, state: tauri::State<AppState>) {
     use tauri::Emitter;
+    let account = state.settings.lock().ok().and_then(|s| s.tray_account.clone());
     crate::tray::show_main(&app);
-    let _ = app.emit_to("main", "start-weekly-report", ());
+    let _ = app.emit_to("main", "start-weekly-report", serde_json::json!({ "account": account }));
 }
 
 #[tauri::command]
@@ -417,6 +624,10 @@ mod tests {
     use super::*;
     use chrono::{DateTime, NaiveDate, TimeZone, Utc};
     use std::fs;
+
+    use crate::accounts::{ConfigDir, Identity};
+
+    const ME: &str = "acct:me:o1";
 
     struct UtcDay(NaiveDate);
     impl Clock for UtcDay {
@@ -437,11 +648,20 @@ mod tests {
         if !managed.is_empty() {
             fs::write(&managed_settings, managed).unwrap();
         }
+        // One config folder, `root`'s parent, signed in to ME, whose budget is 310.
+        let dir = ConfigDir {
+            dir: root.parent().unwrap().to_path_buf(),
+            origin: "Test".into(),
+            identity: Some(Identity { account_uuid: "me".into(), org_uuid: "o1".into(), ..Default::default() }),
+            custom: false,
+        };
+        let mut settings = AppSettings { tray_account: Some(ME.into()), ..Default::default() };
+        settings.accounts.insert(ME.into(), AccountSettings { monthly_budget_usd: 310.0, ..Default::default() });
         AppState {
             store: Mutex::new(Store::open(&data.join("cache.sqlite")).unwrap()),
             price: Mutex::new(PriceTable::seed()),
-            claude_roots: vec![root.to_path_buf()],
-            settings: Mutex::new(AppSettings { monthly_budget_usd: 310.0, ..Default::default() }),
+            discovery: Mutex::new(Discovery::new(vec![dir], &settings)),
+            settings: Mutex::new(settings),
             price_path: data.join("prices.json"),
             settings_path: data.join("settings.json"),
             label_progress: Mutex::new(LabelProgress::default()),
@@ -464,13 +684,127 @@ mod tests {
         state.settings.lock().unwrap().show_in_menu_bar = true;
         let after = set_report_hide(&state, true).unwrap();
         assert!(after.report_hide_projects);
-        assert_eq!((after.monthly_budget_usd, after.show_in_menu_bar), (310.0, true));
+        assert_eq!((after.account(ME).monthly_budget_usd, after.show_in_menu_bar), (310.0, true));
         let saved = AppSettings::load_or_default(&state.settings_path);
         assert_eq!(saved, after, "the file holds the same settings");
         assert_eq!(*state.settings.lock().unwrap(), after);
         let off = set_report_hide(&state, false).unwrap();
         assert!(!off.report_hide_projects);
-        assert_eq!(off.monthly_budget_usd, 310.0);
+        assert_eq!(off.account(ME).monthly_budget_usd, 310.0);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_whole_settings_save_keeps_the_account_settings_it_did_not_see() {
+        let current = {
+            let mut s = AppSettings { tray_account: Some(ME.into()), extra_config_dirs: vec!["/x".into()], ..Default::default() };
+            s.accounts.insert(ME.into(), AccountSettings { monthly_budget_usd: 99.0, ..Default::default() });
+            s
+        };
+        // A card's copy from before that budget was set, with its own change.
+        let card = AppSettings { ollama_model: "qwen3:32b".into(), ..Default::default() };
+        let next = with_accounts_of(card, &current);
+        assert_eq!(next.ollama_model, "qwen3:32b");
+        assert_eq!(next.account(ME).monthly_budget_usd, 99.0);
+        assert_eq!(next.tray_account.as_deref(), Some(ME));
+        assert_eq!(next.extra_config_dirs, vec!["/x".to_string()]);
+    }
+
+    /// Two accounts' folders, one call each today: Personal $5, Acme $25.
+    fn two_accounts(name: &str) -> (PathBuf, AppState) {
+        let dir = std::env::temp_dir().join(format!("ci_two_accounts_{name}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let call = |id: &str, input: i64| {
+            format!(r#"{{"type":"assistant","sessionId":"s-{id}","timestamp":"2026-10-01T10:00:00.000Z","message":{{"id":"{id}","role":"assistant","model":"claude-opus-4-8","usage":{{"input_tokens":{input}}}}}}}"#) + "\n"
+        };
+        for (cfg, id, input) in [(".claude", "m-personal", 1_000_000), (".claude-work", "m-work", 5_000_000)] {
+            // The same project folder used from both accounts.
+            let proj = dir.join("home").join(cfg).join("projects").join("-home-me-app");
+            fs::create_dir_all(&proj).unwrap();
+            fs::write(proj.join(format!("{id}.jsonl")), call(id, input)).unwrap();
+        }
+        let state = state_for(&dir.join("home").join(".claude").join("projects"), &dir.join("data"), "");
+        let work = ConfigDir {
+            dir: dir.join("home").join(".claude-work"),
+            origin: "Test".into(),
+            identity: Some(Identity { account_uuid: "me".into(), org_uuid: "acme".into(), org_name: Some("Acme".into()), ..Default::default() }),
+            custom: false,
+        };
+        {
+            let settings = state.settings.lock().unwrap().clone();
+            let mut d = state.discovery.lock().unwrap();
+            let mut dirs = d.dirs.clone();
+            dirs.push(work);
+            *d = Discovery::new(dirs, &settings);
+        }
+        (dir, state)
+    }
+
+    #[test]
+    fn each_account_is_counted_apart_and_a_hidden_one_leaves_all_accounts() {
+        let (dir, state) = two_accounts("split");
+        refresh_store(&state).unwrap();
+        let p = PriceTable::seed();
+        let cost = |f: Filters| {
+            let f = scoped(&state, f).unwrap();
+            state.store.lock().unwrap().totals(&p, &f).unwrap().est_cost_usd
+        };
+        let only = |a: &str| Filters { account: Some(a.into()), ..Default::default() };
+        assert!((cost(only(ME)) - 5.0).abs() < 1e-9);
+        assert!((cost(only("acct:me:acme")) - 25.0).abs() < 1e-9);
+        assert!((cost(Filters::default()) - 30.0).abs() < 1e-9);
+
+        // One project folder, two accounts: two rows.
+        let projects = state.store.lock().unwrap().by_project(&p, &Filters::default()).unwrap();
+        let mut rows: Vec<(String, String)> = projects.iter().map(|r| (r.project.clone(), r.account.clone())).collect();
+        rows.sort();
+        assert_eq!(rows, vec![("-home-me-app".into(), "acct:me:acme".into()), ("-home-me-app".into(), ME.into())]);
+        let sessions = state.store.lock().unwrap().get_sessions(&p, &only("acct:me:acme")).unwrap();
+        assert_eq!(sessions.iter().map(|s| s.account.as_str()).collect::<Vec<_>>(), vec!["acct:me:acme"]);
+
+        // Hidden: out of "all accounts", still there on its own.
+        state.settings.lock().unwrap().accounts.insert("acct:me:acme".into(), AccountSettings { hidden: true, ..Default::default() });
+        assert!((cost(Filters::default()) - 5.0).abs() < 1e-9);
+        assert!((cost(only("acct:me:acme")) - 25.0).abs() < 1e-9);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_ring_follows_one_accounts_budget_and_all_accounts_has_none() {
+        let (dir, state) = two_accounts("ring");
+        let clock = UtcDay(NaiveDate::from_ymd_opt(2026, 10, 1).unwrap());
+        let mine = gauge_view(&state, &clock, true).unwrap();
+        assert_eq!(mine.account.as_deref(), Some(ME));
+        assert_eq!(mine.account_label.as_deref(), Some("Personal"));
+        assert!((mine.budget.today - 5.0).abs() < 1e-9, "only this account's call");
+        assert_eq!(mine.budget.ring, budget::Ring::Green, "$5 of a $10 day");
+
+        let work = gauge_view_for(&state, &clock, false, Some("acct:me:acme")).unwrap();
+        assert!((work.budget.today - 25.0).abs() < 1e-9);
+        assert_eq!(work.budget.ring, budget::Ring::None, "no budget set for it");
+
+        let all = gauge_view_for(&state, &clock, false, None).unwrap();
+        assert!((all.budget.today - 30.0).abs() < 1e-9);
+        assert_eq!(all.budget.ring, budget::Ring::None);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_folder_moved_to_another_account_takes_its_rows_without_a_reread() {
+        let (dir, state) = two_accounts("move");
+        refresh_store(&state).unwrap();
+        let work_dir = dir.join("home").join(".claude-work").to_string_lossy().to_string();
+        {
+            let mut s = state.settings.lock().unwrap();
+            s.dir_accounts.insert(work_dir, ME.into());
+            let mut d = state.discovery.lock().unwrap();
+            *d = Discovery::new(d.dirs.clone(), &s);
+        }
+        let summary = refresh_store(&state).unwrap();
+        assert_eq!(summary.files_parsed, 0, "moved, not read again");
+        let t = state.store.lock().unwrap().totals(&PriceTable::seed(), &Filters { account: Some(ME.into()), ..Default::default() }).unwrap();
+        assert!((t.est_cost_usd - 30.0).abs() < 1e-9);
+        assert_eq!(accounts(&state).unwrap().len(), 1);
         fs::remove_dir_all(&dir).ok();
     }
 

@@ -14,6 +14,7 @@ import Sessions from "./screens/Sessions";
 import SessionDetail from "./screens/SessionDetail";
 import { ExportButton } from "./components/ExportButton";
 import { WeeklyReportButton } from "./components/WeeklyReportButton";
+import { AccountSelect } from "./components/Accounts";
 
 const TABS: { id: import("./state/nav").Screen; label: string }[] = [
   { id: "overview", label: "Overview" },
@@ -31,7 +32,13 @@ export default function App() {
   const qc = useQueryClient();
   const [refreshError, setRefreshError] = useState<string | null>(null);
 
-  const projects = useQuery({ queryKey: ["projects-list"], queryFn: () => getByProject({}) });
+  // The project picker lists the picked account's projects; one folder used from two
+  // accounts is one choice.
+  const projects = useQuery({
+    queryKey: ["projects-list", filters.account],
+    queryFn: () => getByProject({ account: filters.account }),
+    select: (rows) => [...new Set(rows.map((p) => p.project))],
+  });
   const refreshMut = useMutation({
     mutationFn: refresh,
     onSuccess: () => {
@@ -66,7 +73,8 @@ export default function App() {
             </button>
           ))}
         </nav>
-        <div className="ml-auto flex items-center gap-2 text-sm text-ink">
+        <div className="ml-auto flex items-center gap-2 text-sm text-ink flex-wrap">
+          <AccountSelect />
           <input
             type="date"
             value={filters.from ?? ""}
@@ -87,7 +95,7 @@ export default function App() {
           >
             <option value="">All projects</option>
             {(projects.data ?? []).map((p) => (
-              <option key={p.project} value={p.project}>{p.project}</option>
+              <option key={p} value={p}>{p}</option>
             ))}
           </select>
           <ExportButton />

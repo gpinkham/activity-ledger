@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS files (
     path TEXT PRIMARY KEY,
     size INTEGER NOT NULL,
     mtime INTEGER NOT NULL,
-    parsed_at INTEGER NOT NULL
+    parsed_at INTEGER NOT NULL,
+    account TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
@@ -42,8 +43,10 @@ CREATE TABLE IF NOT EXISTS messages (
     message_id TEXT,
     agent_id TEXT,
     web_searches INTEGER NOT NULL DEFAULT 0,
+    account TEXT NOT NULL DEFAULT '',
     dup INTEGER NOT NULL DEFAULT 0
 );
+CREATE INDEX IF NOT EXISTS idx_messages_account ON messages(account);
 CREATE INDEX IF NOT EXISTS idx_messages_file ON messages(file);
 CREATE INDEX IF NOT EXISTS idx_messages_message_id ON messages(message_id);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
@@ -62,6 +65,7 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     tag TEXT,
     fail_count INTEGER,
     test_key TEXT,
+    account TEXT NOT NULL DEFAULT '',
     dup INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_tool_calls_tool_use_id ON tool_calls(tool_use_id);
@@ -77,6 +81,7 @@ CREATE TABLE IF NOT EXISTS prompts (
     kind TEXT NOT NULL,
     trigger TEXT,
     msg_ids TEXT,
+    account TEXT NOT NULL DEFAULT '',
     dup INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_prompts_file ON prompts(file);
@@ -107,7 +112,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     project TEXT NOT NULL,
     started_at TEXT,
     ended_at TEXT,
-    message_count INTEGER NOT NULL
+    message_count INTEGER NOT NULL,
+    account TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS session_titles (
     session_id TEXT PRIMARY KEY,
@@ -117,7 +123,10 @@ CREATE TABLE IF NOT EXISTS session_titles (
 
 /// Bump when a stored table changes shape. An older cache is dropped and every
 /// transcript re-read (the cache is derived data; the transcripts are the truth).
-const SCHEMA_VERSION: &str = "10";
+const SCHEMA_VERSION: &str = "11";
+/// Versions whose model labels still hold: only the parsed tables changed since
+/// (11 added the account columns), and a label is keyed by segment, not by file.
+const LABELS_KEPT_FROM: &[&str] = &["10"];
 const DATA_TABLES: &str = "DROP TABLE IF EXISTS messages; DROP TABLE IF EXISTS tool_calls;
     DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS session_titles; DROP TABLE IF EXISTS files;
     DROP TABLE IF EXISTS prompts; DROP TABLE IF EXISTS subagents; DROP TABLE IF EXISTS cost_states;
@@ -134,7 +143,8 @@ impl Store {
             .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0))
             .ok();
         if version.as_deref() != Some(SCHEMA_VERSION) {
-            conn.execute_batch(DATA_TABLES)?;
+            let keep_labels = version.as_deref().is_some_and(|v| LABELS_KEPT_FROM.contains(&v));
+            conn.execute_batch(if keep_labels { PARSED_TABLES } else { DATA_TABLES })?;
             conn.execute(
                 "INSERT INTO meta(key, value) VALUES ('schema_version', ?1)
                  ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -231,28 +241,28 @@ impl Store {
         }
         for m in &parsed.messages {
             tx.execute(
-                "INSERT INTO messages(file, session_id, project, ts, role, model, version, git_branch, service_tier, stop_reason, input_tokens, output_tokens, cache_creation, cache_read, ephemeral_1h, ephemeral_5m, message_id, agent_id, web_searches)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+                "INSERT INTO messages(file, session_id, project, ts, role, model, version, git_branch, service_tier, stop_reason, input_tokens, output_tokens, cache_creation, cache_read, ephemeral_1h, ephemeral_5m, message_id, agent_id, web_searches, account)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
                 params![
                     path, m.session_id, sf.project, m.ts, m.role, m.model, m.version, m.git_branch,
                     m.service_tier, m.stop_reason, m.input_tokens, m.output_tokens,
                     m.cache_creation, m.cache_read, m.ephemeral_1h, m.ephemeral_5m,
-                    m.message_id, m.agent_id, m.web_searches
+                    m.message_id, m.agent_id, m.web_searches, sf.account
                 ],
             )?;
         }
         for t in &parsed.tool_calls {
             tx.execute(
-                "INSERT INTO tool_calls(file, session_id, project, ts, name, is_mcp, user_modified, tool_use_id, tag, fail_count, test_key)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
-                params![path, t.session_id, sf.project, t.ts, t.name, t.is_mcp as i64, t.user_modified, t.tool_use_id, t.tag, t.fail_count, t.test_key],
+                "INSERT INTO tool_calls(file, session_id, project, ts, name, is_mcp, user_modified, tool_use_id, tag, fail_count, test_key, account)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                params![path, t.session_id, sf.project, t.ts, t.name, t.is_mcp as i64, t.user_modified, t.tool_use_id, t.tag, t.fail_count, t.test_key, sf.account],
             )?;
         }
         for p in &parsed.prompts {
             tx.execute(
-                "INSERT INTO prompts(file, session_id, project, agent_id, ts, kind, trigger, msg_ids)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-                params![path, p.session_id, sf.project, p.agent_id, p.ts, p.kind, p.trigger, p.msg_ids],
+                "INSERT INTO prompts(file, session_id, project, agent_id, ts, kind, trigger, msg_ids, account)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![path, p.session_id, sf.project, p.agent_id, p.ts, p.kind, p.trigger, p.msg_ids, sf.account],
             )?;
         }
         if let Some(meta) = &sf.subagent {
@@ -278,11 +288,30 @@ impl Store {
             )?;
         }
         tx.execute(
-            "INSERT INTO files(path, size, mtime, parsed_at) VALUES (?1,?2,?3, strftime('%s','now'))
-             ON CONFLICT(path) DO UPDATE SET size=excluded.size, mtime=excluded.mtime, parsed_at=excluded.parsed_at",
-            params![path, sf.size, sf.mtime],
+            "INSERT INTO files(path, size, mtime, parsed_at, account) VALUES (?1,?2,?3, strftime('%s','now'), ?4)
+             ON CONFLICT(path) DO UPDATE SET size=excluded.size, mtime=excluded.mtime, parsed_at=excluded.parsed_at, account=excluded.account",
+            params![path, sf.size, sf.mtime, sf.account],
         )?;
         tx.commit()
+    }
+
+    /// Count an unchanged file in another account (its folder was moved in settings,
+    /// or signed in as someone else) without reading it again. Returns whether it moved.
+    pub fn reassign(&mut self, path: &str, account: &str) -> rusqlite::Result<bool> {
+        let current: Option<String> = self
+            .conn
+            .query_row("SELECT account FROM files WHERE path = ?1", params![path], |r| r.get(0))
+            .ok();
+        if current.as_deref().is_none_or(|c| c == account) {
+            return Ok(false);
+        }
+        let tx = self.conn.transaction()?;
+        for table in ["files", "messages", "tool_calls", "prompts"] {
+            let col = if table == "files" { "path" } else { "file" };
+            tx.execute(&format!("UPDATE {table} SET account = ?1 WHERE {col} = ?2"), params![account, path])?;
+        }
+        tx.commit()?;
+        Ok(true)
     }
 
     /// The same record can sit in several files (a session file present under two
@@ -311,8 +340,8 @@ impl Store {
         self.mark_duplicates()?;
         self.conn.execute("DELETE FROM sessions", [])?;
         self.conn.execute(
-            "INSERT INTO sessions(session_id, project, started_at, ended_at, message_count)
-             SELECT session_id, MIN(project), MIN(ts), MAX(ts), COUNT(*)
+            "INSERT INTO sessions(session_id, project, started_at, ended_at, message_count, account)
+             SELECT session_id, MIN(project), MIN(ts), MAX(ts), COUNT(*), MIN(account)
              FROM messages WHERE dup = 0 GROUP BY session_id",
             [],
         )?;
@@ -352,6 +381,7 @@ mod tests {
             size: 123,
             mtime: 456,
             subagent: None,
+            account: String::new(),
         };
         store.replace_file(&sf, &parsed).unwrap();
         store.rebuild_sessions().unwrap();
@@ -387,7 +417,7 @@ mod tests {
         let mut store = seed();
         let content = include_str!("../tests/fixtures/sample.jsonl");
         let parsed = parse_str("proj-a", content);
-        let sf = ScannedFile { path: "/x/proj-a/s1.jsonl".into(), project: "proj-a".into(), size: 999, mtime: 456, subagent: None };
+        let sf = ScannedFile { path: "/x/proj-a/s1.jsonl".into(), project: "proj-a".into(), size: 999, mtime: 456, subagent: None, account: String::new() };
         store.replace_file(&sf, &parsed).unwrap();
         let mc: i64 = store.conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0)).unwrap();
         assert_eq!(mc, 3, "reparsing the same session must replace, not duplicate");
@@ -402,7 +432,7 @@ mod tests {
     }
 
     fn sub_file(path: &str, sub: Option<SubagentMeta>) -> ScannedFile {
-        ScannedFile { path: path.into(), project: "proj-a".into(), size: 1, mtime: 1, subagent: sub }
+        ScannedFile { path: path.into(), project: "proj-a".into(), size: 1, mtime: 1, subagent: sub, account: String::new() }
     }
 
     #[test]
@@ -490,8 +520,8 @@ mod tests {
     fn the_live_copy_does_not_depend_on_which_file_was_read_last() {
         let mut store = Store::open_in_memory();
         let parsed = parse_str("proj-a", include_str!("../tests/fixtures/activity.jsonl"));
-        let a = ScannedFile { path: "/x/a/sa.jsonl".into(), project: "a".into(), size: 1, mtime: 1, subagent: None };
-        let b = ScannedFile { path: "/x/b/sa.jsonl".into(), project: "b".into(), size: 1, mtime: 1, subagent: None };
+        let a = ScannedFile { path: "/x/a/sa.jsonl".into(), project: "a".into(), size: 1, mtime: 1, subagent: None, account: String::new() };
+        let b = ScannedFile { path: "/x/b/sa.jsonl".into(), project: "b".into(), size: 1, mtime: 1, subagent: None, account: String::new() };
         let live = |store: &Store| -> String {
             store.conn.query_row("SELECT DISTINCT project FROM messages WHERE dup = 0 AND message_id = 'msg_1'", [], |r| r.get(0)).unwrap()
         };
@@ -510,8 +540,8 @@ mod tests {
         let parsed = parse_str("proj-a", include_str!("../tests/fixtures/activity.jsonl"));
         // An old copy under a "-test" folder sorts first by path ('-' < '/') but
         // was last written long ago; the live file keeps growing.
-        let stale = ScannedFile { path: "/x/-Users-me-app-test/sa.jsonl".into(), project: "-Users-me-app-test".into(), size: 1, mtime: 100, subagent: None };
-        let live = ScannedFile { path: "/x/-Users-me-app/sa.jsonl".into(), project: "-Users-me-app".into(), size: 2, mtime: 200, subagent: None };
+        let stale = ScannedFile { path: "/x/-Users-me-app-test/sa.jsonl".into(), project: "-Users-me-app-test".into(), size: 1, mtime: 100, subagent: None, account: String::new() };
+        let live = ScannedFile { path: "/x/-Users-me-app/sa.jsonl".into(), project: "-Users-me-app".into(), size: 2, mtime: 200, subagent: None, account: String::new() };
         store.replace_file(&stale, &parsed).unwrap();
         store.replace_file(&live, &parsed).unwrap();
         store.rebuild_sessions().unwrap();
