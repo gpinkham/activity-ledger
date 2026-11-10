@@ -5,6 +5,9 @@
   "description": "A local desktop app that shows what your Claude Code sessions cost, by kind of work.",
   "license": "MIT",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",

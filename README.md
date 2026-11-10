@@ -80,7 +80,7 @@ Download the signed app from the [latest release](https://github.com/gpinkham/ac
 
 - macOS or Windows 10/11 (other platforms are untested)
 - [Rust](https://rustup.rs) (stable)
-- [Node.js](https://nodejs.org) 20 or later
+- [Node.js](https://nodejs.org) 22 or later
 - On macOS: Xcode Command Line Tools: `xcode-select --install`
 - On Windows: [Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) ("Desktop development with C++") and WebView2, which Windows 10 and 11 already have
 
