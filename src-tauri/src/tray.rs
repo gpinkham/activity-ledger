@@ -119,6 +119,9 @@ fn toggle_panel(app: &AppHandle, rect: tauri::Rect) {
                 .visible(false)
                 .build()
             else {
+                // The icon has no menu to fall back on, so a click must still lead
+                // somewhere: the main window, which has the app menu and Cmd+Q.
+                show_main(app);
                 return;
             };
             let hide = p.clone();
