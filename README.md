@@ -74,7 +74,7 @@ The app asks the model for a JSON answer limited to the label list (Ollama's str
 
 ## Install
 
-Download the signed app from the [latest release](https://github.com/gpinkham/activity-ledger/releases/latest): one zip that runs on Apple silicon and Intel Macs, signed with a Developer ID and notarized by Apple, so it opens like any other app. Unzip it and move Activity Ledger to Applications. To build it yourself instead, read on.
+Download the signed app from the [latest release](https://github.com/gpinkham/activity-ledger/releases/latest): one zip that runs on Apple silicon and Intel Macs, signed with a Developer ID and notarized by Apple, so it opens like any other app. Unzip it and move Activity Ledger to Applications. To build it yourself instead, read on. On Windows, see [Windows](#windows).
 
 ### Requirements
 
@@ -89,7 +89,7 @@ Download the signed app from the [latest release](https://github.com/gpinkham/ac
 ```bash
 npm ci
 npm run tauri dev       # run in development
-npm run tauri build     # build the app for this Mac
+npm run tauri build     # build the app for this computer
 ```
 
 For one app that runs on both Apple silicon and Intel Macs:
@@ -101,7 +101,35 @@ npm run build:universal
 
 The built app is under `src-tauri/target/.../bundle/macos/`. A build you make yourself is not signed or notarized, so the first time you open it, right click it and choose **Open**. The download from the releases page needs no such step.
 
-On Windows, `npm run tauri build` makes an MSI and a setup `.exe` under `src-tauri/target/release/bundle/msi/` and `bundle/nsis/`. They are not signed, so SmartScreen warns the first time; choose **More info**, then **Run anyway**. There the budget ring sits in the system tray, its panel opens above the taskbar, and transcripts are read from `%USERPROFILE%\.claude\projects` and, for Claude Code run inside WSL, from each WSL distro's `~/.claude/projects` (found with `wsl.exe -l -q`; reading one may start that distro). CI builds both platforms on every push (`.github/workflows/build.yml`).
+### Windows
+
+There is no signed Windows download yet; build it yourself.
+
+**Set up** (once, in PowerShell; the Build Tools take a while and ask for admin):
+
+```powershell
+winget install Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+winget install Rustlang.Rustup
+winget install OpenJS.NodeJS.LTS
+winget install Git.Git
+```
+
+WebView2 is already part of Windows 10 and 11. Keep the repository on a Windows drive (for example `C:\projects\activity-ledger`), not inside WSL: npm and cargo are slow and unreliable over `\\wsl.localhost`.
+
+**Build and run** with the same commands as above. `npm run tauri dev` runs the current code without installing anything. `npm run tauri build` makes an MSI and a setup `.exe` under `src-tauri\target\release\bundle\msi\` and `bundle\nsis\`.
+
+- **Smart App Control** must be off to build: every Rust build runs small programs it compiles itself, and Smart App Control blocks them. It has no per-app exceptions. It also blocks running an unsigned build. Turn it off under Windows Security, App & browser control, Smart App Control.
+- **SmartScreen** warns the first time you run the unsigned installer; choose **More info**, then **Run anyway**.
+- **Reinstalling the same version** does nothing: the MSI sees the app as already installed. Uninstall it first (Settings, Apps; your data in the app's data folder is kept), or raise the version.
+
+**What is different on Windows:**
+
+- Transcripts are read from `%USERPROFILE%\.claude\projects` and, for Claude Code run inside WSL, from each WSL user's `~/.claude/projects` in each distro (found with `wsl.exe -l -q`; Docker Desktop's distros are skipped). Reading a distro that is not running starts it. Press **Refresh** to read what is new.
+- The budget ring sits in the system tray, and its panel opens above the taskbar. Windows 11 puts a new tray icon in the overflow (the **^** next to the clock); drag it out to keep it in view.
+- Claude Code's managed `modelPricing` is read from `C:\Program Files\ClaudeCode\managed-settings.json`.
+- The main window opens maximized (`src-tauri/tauri.windows.conf.json`).
+
+CI builds and tests macOS and Windows on every pull request and push to `main` (`.github/workflows/build.yml`).
 
 ### Signed build (maintainers)
 
@@ -115,7 +143,7 @@ npm run test:ui
 npx tsc --noEmit
 ```
 
-At 0.3.1: 178 Rust tests and 35 front-end tests. The weekly report's expected output is checked in at `src-tauri/tests/fixtures/weekly-report.golden.md`; after a deliberate change, rewrite it with `UPDATE_GOLDEN=1 cargo test report::` and read the diff.
+184 Rust tests and 36 front-end tests; on Windows the 4 tests of the macOS signing script are skipped. The weekly report's expected output is checked in at `src-tauri/tests/fixtures/weekly-report.golden.md`; after a deliberate change, rewrite it with `UPDATE_GOLDEN=1 cargo test report::` and read the diff.
 
 ## License
 
