@@ -11,6 +11,32 @@ export interface TrayPanelProps {
   onOpen: () => void;
   /** Opens the main window's weekly report save flow. The panel writes nothing. */
   onSaveReport?: () => void;
+  /** Quits the app. The icon has no menu of its own, so this is the only way out of the menu bar. */
+  onQuit?: () => void;
+}
+
+const BUTTON = "px-3 py-1 rounded-md border border-line text-ink hover:bg-elevated";
+
+/** Open and Quit, and Save weekly report once there are figures. Shown in every state,
+ *  loading and error included: a click on the icon only ever opens this panel. */
+function Actions({ onOpen, onSaveReport, onQuit }: Pick<TrayPanelProps, "onOpen" | "onSaveReport" | "onQuit">) {
+  return (
+    <div className="mt-1 flex flex-col gap-2">
+      <button onClick={onOpen} className={BUTTON}>
+        Open Activity Ledger
+      </button>
+      {onSaveReport && (
+        <button onClick={onSaveReport} data-save-report className={BUTTON}>
+          Save weekly report
+        </button>
+      )}
+      {onQuit && (
+        <button onClick={onQuit} data-quit className={BUTTON}>
+          Quit Activity Ledger
+        </button>
+      )}
+    </div>
+  );
 }
 
 function Row({ label, value, className = "" }: { label: string; value: string; className?: string }) {
@@ -22,11 +48,12 @@ function Row({ label, value, className = "" }: { label: string; value: string; c
   );
 }
 
-export function TrayPanel({ view, split, error, onOpen, onSaveReport }: TrayPanelProps) {
+export function TrayPanel({ view, split, error, onOpen, onSaveReport, onQuit }: TrayPanelProps) {
   if (!view) {
     return (
-      <div className="p-4 text-sm text-muted" data-state="loading">
+      <div className="p-4 text-sm text-muted flex flex-col gap-2" data-state="loading">
         {error ? <p className="text-red-500">{error}</p> : <p>Reading this month&apos;s transcripts…</p>}
+        <Actions onOpen={onOpen} onQuit={onQuit} />
       </div>
     );
   }
@@ -61,16 +88,7 @@ export function TrayPanel({ view, split, error, onOpen, onSaveReport }: TrayPane
       {error && <p className="text-xs text-red-500">{error}</p>}
       <p className="text-xs text-muted" data-note>{rateNote(view.rate_source)}</p>
 
-      <button onClick={onOpen}
-        className="mt-1 px-3 py-1 rounded-md border border-line text-ink hover:bg-elevated">
-        Open Activity Ledger
-      </button>
-      {onSaveReport && (
-        <button onClick={onSaveReport} data-save-report
-          className="px-3 py-1 rounded-md border border-line text-ink hover:bg-elevated">
-          Save weekly report
-        </button>
-      )}
+      <Actions onOpen={onOpen} onSaveReport={onSaveReport} onQuit={onQuit} />
     </div>
   );
 }

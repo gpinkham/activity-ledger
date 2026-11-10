@@ -132,6 +132,26 @@ test("before the first figures arrive, and on an error", () => {
   assert.match(html({ view: null, split: null, error: "no transcripts" }), /no transcripts/);
 });
 
+// The menu bar icon has no native menu (tray.rs), so the panel is the only way to
+// open the window or quit while the app lives in the menu bar: both buttons are
+// there in every state, the loading and error ones included.
+test("Open and Quit are in the panel in every state", () => {
+  const states = {
+    loading: { view: null, split: null },
+    error: { view: null, split: null, error: "no transcripts" },
+    "no budget": { view: view(budget({ ring: "none", today_share: 0 })), split: null },
+    green: { view: view(budget()), split: { work_usd: 3, overhead_usd: 1 } },
+  };
+  for (const [name, props] of Object.entries(states)) {
+    const h = html({ ...props, onQuit: () => {}, onSaveReport: () => {} });
+    assert.match(h, />Open Activity Ledger</, name);
+    assert.match(h, /data-quit[^>]*>Quit Activity Ledger</, name);
+  }
+  assert.ok(!html({ view: null, split: null, onSaveReport: () => {} }).includes("data-save-report"),
+    "no weekly report before there are figures");
+  assert.ok(!html({ view: null, split: null }).includes("data-quit"), "no Quit when no handler is given");
+});
+
 test("no en or em dashes in what the panel or the budget card say", async () => {
   const { readFileSync } = await import("node:fs");
   for (const f of ["../src/screens/TrayPanel.tsx", "../src/lib/gauge.ts", "../src/components/BudgetCard.tsx", "../src/screens/TrayApp.tsx"]) {

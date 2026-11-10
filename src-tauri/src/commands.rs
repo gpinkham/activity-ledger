@@ -340,6 +340,13 @@ pub fn open_main_window(app: tauri::AppHandle) {
     crate::tray::show_main(&app);
 }
 
+/// The panel's "Quit Activity Ledger". The menu bar icon has no menu of its own
+/// (tray.rs), so this is how the app is quit while it lives in the menu bar.
+#[tauri::command]
+pub fn quit_app(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
 #[tauri::command]
 pub fn get_sessions(state: tauri::State<AppState>, filters: Filters) -> Result<Vec<SessionSummary>, String> {
     let store = state.store.lock().map_err(|e| e.to_string())?;

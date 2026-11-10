@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "tray-panel",
-  "description": "The menu bar gauge's panel: reads its figures and opens the main window, nothing else",
+  "description": "The menu bar gauge's panel: reads its figures, opens the main window and quits the app, nothing else",
   "windows": ["tray-panel"],
   "permissions": [
     "core:default"

@@ -1,5 +1,12 @@
 //! The menu bar gauge: a ring for today's spend as a share of today's allowance,
-//! a small panel under it on a click, and a menu with Open and Quit.
+//! and a small panel under it on any click. The panel holds Open, Save weekly
+//! report and Quit.
+//!
+//! The icon has no native menu. With one attached, tray-icon 0.24 gives the
+//! status item that menu for the life of the icon, and on macOS 27 AppKit then
+//! opens it on every click before our handler sees the click (tauri issue
+//! 16035), so the panel never shows. With no menu, every click reaches
+//! `on_tray_icon_event`, whichever button it was.
 //!
 //! Off unless "Show in menu bar" is on. With it on, closing the main window hides
 //! it and the app leaves the Dock (accessory mode); "Open Activity Ledger" brings
@@ -10,8 +17,7 @@ use crate::budget::Ring;
 use crate::commands::{gauge_view, AppState};
 use crate::gauge::SystemClock;
 use tauri::image::Image;
-use tauri::menu::{Menu, MenuItem};
-use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::tray::{MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 pub const TRAY_ID: &str = "gauge";
@@ -147,6 +153,16 @@ fn toggle_panel(app: &AppHandle, rect: tauri::Rect) {
     let _ = tauri::Emitter::emit_to(app, PANEL, "gauge-shown", ());
 }
 
+/// Where the icon is, when `e` is the release of any mouse button on it: the
+/// click that opens or closes the panel. Presses, double clicks, moves, enter
+/// and leave are not.
+fn panel_click(e: &TrayIconEvent) -> Option<tauri::Rect> {
+    match e {
+        TrayIconEvent::Click { button_state: MouseButtonState::Up, rect, .. } => Some(*rect),
+        _ => None,
+    }
+}
+
 /// The panel's left edge, in physical pixels: centred on `centre`, and within the
 /// screen `(left, width)` when it is known, else at or right of 0.
 fn panel_x(centre: f64, panel_w: f64, screen: Option<(f64, f64)>) -> f64 {
@@ -162,21 +178,13 @@ pub fn sync(app: &AppHandle) -> tauri::Result<()> {
     let on = app.state::<AppState>().settings.lock().map(|s| s.show_in_menu_bar).unwrap_or(false);
     let present = app.tray_by_id(TRAY_ID).is_some();
     if on && !present {
-        let open = MenuItem::with_id(app, "open", "Open Activity Ledger", true, None::<&str>)?;
-        let quit = MenuItem::with_id(app, "quit", "Quit Activity Ledger", true, None::<&str>)?;
-        let menu = Menu::with_items(app, &[&open, &quit])?;
+        // No .menu(): see the note at the top. Left, right or Control click, the
+        // release of any button opens or closes the panel.
         TrayIconBuilder::with_id(TRAY_ID)
             .icon(Image::new_owned(ring_rgba(Ring::None, 0.0), ICON, ICON))
             .tooltip("Activity Ledger")
-            .menu(&menu)
-            .show_menu_on_left_click(false)
-            .on_menu_event(|app, e| match e.id().as_ref() {
-                "open" => show_main(app),
-                "quit" => app.exit(0),
-                _ => {}
-            })
             .on_tray_icon_event(|tray, e| {
-                if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, rect, .. } = e {
+                if let Some(rect) = panel_click(&e) {
                     toggle_panel(tray.app_handle(), rect);
                 }
             })
@@ -221,6 +229,40 @@ pub fn start_poll(app: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tauri::tray::{MouseButton, TrayIconId};
+    use tauri::{PhysicalPosition, Position, Rect, Size};
+
+    fn icon_rect() -> Rect {
+        Rect { position: Position::Physical(PhysicalPosition::new(900, 0)), size: Size::Physical(tauri::PhysicalSize::new(44, 48)) }
+    }
+
+    fn click(button: MouseButton, button_state: MouseButtonState) -> TrayIconEvent {
+        TrayIconEvent::Click { id: TrayIconId::new(TRAY_ID), position: PhysicalPosition::new(910.0, 10.0), rect: icon_rect(), button, button_state }
+    }
+
+    #[test]
+    fn the_release_of_any_button_opens_the_panel() {
+        for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
+            let rect = panel_click(&click(button, MouseButtonState::Up));
+            assert!(rect.is_some(), "{button:?} release");
+            let Position::Physical(p) = rect.unwrap().position else { panic!("kept as given") };
+            assert_eq!(p, PhysicalPosition::new(900, 0), "the panel goes under the icon that was clicked");
+        }
+    }
+
+    #[test]
+    fn presses_double_clicks_and_hovers_do_not() {
+        for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
+            assert!(panel_click(&click(button, MouseButtonState::Down)).is_none(), "{button:?} press");
+        }
+        let id = TrayIconId::new(TRAY_ID);
+        let position = PhysicalPosition::new(910.0, 10.0);
+        let rect = icon_rect();
+        assert!(panel_click(&TrayIconEvent::DoubleClick { id: id.clone(), position, rect, button: MouseButton::Left }).is_none());
+        assert!(panel_click(&TrayIconEvent::Enter { id: id.clone(), position, rect }).is_none());
+        assert!(panel_click(&TrayIconEvent::Move { id: id.clone(), position, rect }).is_none());
+        assert!(panel_click(&TrayIconEvent::Leave { id, position, rect }).is_none());
+    }
 
     #[test]
     fn the_panel_stays_on_the_icons_screen() {

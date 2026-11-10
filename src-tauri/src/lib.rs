@@ -94,6 +94,7 @@ pub fn run() {
             commands::get_gauge,
             commands::get_gauge_split,
             commands::open_main_window,
+            commands::quit_app,
             commands::weekly_report,
             commands::set_report_hide_projects,
             commands::open_weekly_report,
