@@ -270,8 +270,13 @@ pub enum RateSource {
     List,
 }
 
-/// The machine-wide managed settings file Claude Code reads on macOS. Read only.
+/// The machine-wide managed settings file Claude Code reads on this OS. Read only.
+#[cfg(target_os = "macos")]
 pub const MANAGED_SETTINGS_PATH: &str = "/Library/Application Support/ClaudeCode/managed-settings.json";
+#[cfg(target_os = "windows")]
+pub const MANAGED_SETTINGS_PATH: &str = r"C:\Program Files\ClaudeCode\managed-settings.json";
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub const MANAGED_SETTINGS_PATH: &str = "/etc/claude-code/managed-settings.json";
 
 /// One `modelPricing.overrides` row: USD per million tokens. `cache_write` prices
 /// both the 5 minute and the 1 hour cache writes.

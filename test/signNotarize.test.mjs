@@ -8,6 +8,8 @@ import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const identity = "Developer ID Application: Test Name (TEAM1)";
+// The script and its stand-ins are POSIX shell for a Mac build: not run on Windows.
+const skip = { skip: process.platform === "win32" };
 
 /** A copy of the script in a fresh tree, with stand-ins for every outside tool. */
 function setup({ targets, stapler = true }) {
@@ -47,7 +49,7 @@ function setup({ targets, stapler = true }) {
   return { root, run, keychainAsked: () => existsSync(keychain) };
 }
 
-test("a missing Rust target stops the universal build with the command to add it", () => {
+test("a missing Rust target stops the universal build with the command to add it", skip, () => {
   const s = setup({ targets: ["x86_64-apple-darwin"] });
   const r = s.run();
   assert.equal(r.status, 1, r.stderr);
@@ -55,7 +57,7 @@ test("a missing Rust target stops the universal build with the command to add it
   assert.ok(!s.keychainAsked(), "stopped before the keychain lookup");
 });
 
-test("a failed submit still fetches the notary log", () => {
+test("a failed submit still fetches the notary log", skip, () => {
   const s = setup({ targets: [] });
   const r = s.run("--skip-build");
   assert.equal(r.status, 1, r.stdout + r.stderr);
@@ -64,7 +66,7 @@ test("a failed submit still fetches the notary log", () => {
   assert.ok(s.keychainAsked(), "the identity check ran, against the stand-in");
 });
 
-test("a missing stapler stops it before the keychain; a failing `stapler help` does not", () => {
+test("a missing stapler stops it before the keychain; a failing `stapler help` does not", skip, () => {
   const missing = setup({ targets: [], stapler: false });
   const r = missing.run("--skip-build");
   assert.equal(r.status, 1, r.stdout + r.stderr);
@@ -76,7 +78,7 @@ test("a missing stapler stops it before the keychain; a failing `stapler help` d
   assert.ok(present.keychainAsked(), "it went on past the tool checks");
 });
 
-test("uncommitted changes stop it before the keychain: the zip is named after the commit", () => {
+test("uncommitted changes stop it before the keychain: the zip is named after the commit", skip, () => {
   const s = setup({ targets: [] });
   const git = (...a) => spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", ...a], { cwd: s.root, encoding: "utf8" });
   git("init", "-q");

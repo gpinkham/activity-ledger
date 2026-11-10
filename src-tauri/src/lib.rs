@@ -8,6 +8,7 @@ pub mod metrics;
 pub mod models;
 pub mod ollama;
 pub mod parser;
+pub mod paths;
 pub mod pricing;
 pub mod report;
 pub mod scanner;
@@ -32,7 +33,7 @@ pub fn run() {
             let db_path = data_dir.join("activity-ledger.sqlite");
             let mut store = store::Store::open(&db_path).expect("open db");
             let home = dirs::home_dir().expect("home dir");
-            let claude_root = home.join(".claude").join("projects");
+            let claude_roots = scanner::claude_roots(&home);
             let price_path = data_dir.join("prices.json");
             let settings_path = data_dir.join("settings.json");
             let settings = settings::AppSettings::load_or_default(&settings_path);
@@ -43,7 +44,7 @@ pub fn run() {
             app.manage(AppState {
                 store: Mutex::new(store),
                 price: Mutex::new(PriceTable::load_or_seed(&price_path)),
-                claude_root,
+                claude_roots,
                 settings: Mutex::new(settings),
                 price_path,
                 settings_path,

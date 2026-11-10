@@ -51,7 +51,7 @@ pub fn parse_with(project: &str, content: &str, matcher: &Matcher) -> ParsedFile
         let ts = v.get("timestamp").and_then(|s| s.as_str()).unwrap_or("").to_string();
         let git_branch = v.get("gitBranch").and_then(|s| s.as_str()).map(|s| s.to_string());
         let version = v.get("version").and_then(|s| s.as_str()).map(|s| s.to_string());
-        let cwd = v.get("cwd").and_then(|s| s.as_str()).unwrap_or("").to_string();
+        let cwd = crate::paths::slash(v.get("cwd").and_then(|s| s.as_str()).unwrap_or(""));
         let agent_id = v.get("agentId").and_then(|s| s.as_str()).map(|s| s.to_string());
         if !ts.is_empty() && ts > last_ts {
             last_ts = ts.clone();
@@ -219,7 +219,7 @@ pub fn parse_with(project: &str, content: &str, matcher: &Matcher) -> ParsedFile
                             .iter()
                             .find_map(|k| input.and_then(|i| i.get(*k)).and_then(|p| p.as_str()))
                             .unwrap_or("");
-                        if matcher.is_bookkeeping(target, &cwd) {
+                        if matcher.is_bookkeeping(&crate::paths::slash(target), &cwd) {
                             tag = Some("bookkeeping".into());
                         }
                     }
@@ -249,7 +249,7 @@ pub fn parse_with(project: &str, content: &str, matcher: &Matcher) -> ParsedFile
                         }
                     } else if tag.is_none() && ["Edit", "Write", "MultiEdit", "NotebookEdit"].contains(&name.as_str()) {
                         if let Some(path) = input.and_then(|i| i.get("file_path")).and_then(|p| p.as_str()) {
-                            turn_writes.push((path.to_string(), idx));
+                            turn_writes.push((crate::paths::slash(path), idx));
                         }
                     }
                     let test_key = if tag.as_deref() == Some("test") {
@@ -805,7 +805,9 @@ fn tool_tag_in(name: &str, input: Option<&Value>, cwd: &str) -> Option<String> {
     let path = ["file_path", "path", "notebook_path"]
         .iter()
         .find_map(|k| input.get(*k).and_then(|p| p.as_str()))
-        .unwrap_or("");
+        .map(crate::paths::slash)
+        .unwrap_or_default();
+    let path = path.as_str();
     let edits = ["Edit", "Write", "MultiEdit", "NotebookEdit"].contains(&name);
     let in_temp_cwd = !path.starts_with('/') && is_temp_path(&format!("{cwd}/"));
     if edits && (is_temp_path(path) || in_temp_cwd) {

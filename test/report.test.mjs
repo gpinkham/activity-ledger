@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildSync } from "esbuild";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -19,7 +19,7 @@ const build = (entry, name) => {
     bundle: true, format: "esm", platform: "node", jsx: "automatic", outfile,
     external: ["react", "react-dom", "react/jsx-runtime"], logLevel: "silent",
   });
-  return outfile;
+  return pathToFileURL(outfile).href;
 };
 const R = await import(build("../src/lib/report.ts", "report.mjs"));
 const { TrayPanel } = await import(build("../src/screens/TrayPanel.tsx", "TrayPanel-report.mjs"));

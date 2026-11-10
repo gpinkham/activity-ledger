@@ -19,7 +19,8 @@ use std::sync::{Arc, Mutex};
 pub struct AppState {
     pub store: Mutex<Store>,
     pub price: Mutex<PriceTable>,
-    pub claude_root: PathBuf,
+    /// Every folder Claude Code writes transcripts to (scanner::claude_roots).
+    pub claude_roots: Vec<PathBuf>,
     pub settings: Mutex<AppSettings>,
     pub price_path: PathBuf,
     pub settings_path: PathBuf,
@@ -111,8 +112,13 @@ pub fn do_refresh(store: &mut Store, root: &Path) -> rusqlite::Result<RefreshSum
 /// do_refresh with a harness trigger file's parse settings. When they changed
 /// since the cache was read, every transcript is read again.
 pub fn do_refresh_with(store: &mut Store, root: &Path, matcher: &Matcher) -> rusqlite::Result<RefreshSummary> {
+    do_refresh_roots(store, &[root.to_path_buf()], matcher)
+}
+
+/// do_refresh_with, over every transcript folder.
+pub fn do_refresh_roots(store: &mut Store, roots: &[PathBuf], matcher: &Matcher) -> rusqlite::Result<RefreshSummary> {
     store.use_triggers(&matcher.fingerprint())?;
-    let scanned = scan_dir(root);
+    let scanned: Vec<_> = roots.iter().flat_map(|r| scan_dir(r)).collect();
     let mut parsed_count = 0;
     for sf in &scanned {
         let path = sf.path.to_string_lossy().to_string();
@@ -136,7 +142,7 @@ pub fn refresh(state: tauri::State<AppState>) -> Result<RefreshSummary, String> 
     let (config, _) = reload_triggers(&state)?;
     let mut store = state.store.lock().map_err(|e| e.to_string())?;
     store.sender_labels = config.sender_labels(state.home.as_deref());
-    do_refresh_with(&mut store, &state.claude_root, &config.matcher(state.home.as_deref())).map_err(|e| e.to_string())
+    do_refresh_roots(&mut store, &state.claude_roots, &config.matcher(state.home.as_deref())).map_err(|e| e.to_string())
 }
 
 macro_rules! metric_cmd {
@@ -285,7 +291,7 @@ pub fn gauge_view(state: &AppState, clock: &dyn Clock, poll: bool) -> Result<Gau
     };
     let mut tally = state.gauge.lock().map_err(|e| e.to_string())?;
     if poll {
-        tally.poll(&state.claude_root, clock);
+        tally.poll_roots(&state.claude_roots, clock);
     }
     let spend = tally.spend(&prices, clock);
     let t = Thresholds { amber: settings.amber_pct / 100.0, red: settings.red_pct / 100.0 };
@@ -315,7 +321,7 @@ pub fn work_split(state: &AppState, clock: &dyn Clock) -> Result<WorkSplit, Stri
     let (config, _) = reload_triggers(state)?;
     let mut store = state.store.lock().map_err(|e| e.to_string())?;
     store.sender_labels = config.sender_labels(state.home.as_deref());
-    do_refresh_with(&mut store, &state.claude_root, &config.matcher(state.home.as_deref())).map_err(|e| e.to_string())?;
+    do_refresh_roots(&mut store, &state.claude_roots, &config.matcher(state.home.as_deref())).map_err(|e| e.to_string())?;
     let today = clock.today();
     let f = Filters {
         from_ts: Some(iso(clock.start_of(today))),
@@ -423,7 +429,7 @@ mod tests {
         AppState {
             store: Mutex::new(Store::open(&data.join("cache.sqlite")).unwrap()),
             price: Mutex::new(PriceTable::seed()),
-            claude_root: root.to_path_buf(),
+            claude_roots: vec![root.to_path_buf()],
             settings: Mutex::new(AppSettings { monthly_budget_usd: 310.0, ..Default::default() }),
             price_path: data.join("prices.json"),
             settings_path: data.join("settings.json"),

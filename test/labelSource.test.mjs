@@ -5,12 +5,13 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { transformSync } from "esbuild";
 
 const src = readFileSync(new URL("../src/lib/labelSource.ts", import.meta.url), "utf8");
 const out = join(mkdtempSync(join(tmpdir(), "ci-ui-")), "labelSource.mjs");
 writeFileSync(out, transformSync(src, { loader: "ts", format: "esm" }).code);
-const L = await import(out);
+const L = await import(pathToFileURL(out).href);
 
 function memoryStorage(init = {}) {
   const m = new Map(Object.entries(init));

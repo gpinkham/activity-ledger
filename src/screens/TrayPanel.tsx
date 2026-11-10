@@ -1,7 +1,7 @@
 // The menu bar gauge's panel, opened from the ring in the menu bar. Presentation
 // only: TrayApp loads the figures. Every figure is an estimate and says so.
 import type { GaugeView, WorkSplit } from "../lib/types";
-import { money, paceLine, rateNote, remainingLine, ringClass, ringWord, splitShares } from "../lib/gauge";
+import { money, paceLine, rateNote, remainingLine, ringClass, ringWord, splitShares, words } from "../lib/gauge";
 
 export interface TrayPanelProps {
   view: GaugeView | null;
@@ -84,7 +84,7 @@ export function TrayPanel({ view, split, error, onOpen, onSaveReport, onQuit }: 
           value={split === null ? "working it out…" : shares ? `${shares.work}% / ${shares.overhead}%` : "no calls yet"} />
       </div>
 
-      {!set && <p className="text-xs text-muted">Set a monthly budget in Activity Ledger, under Cost by activity, Menu bar budget.</p>}
+      {!set && <p className="text-xs text-muted">Set a monthly budget in Activity Ledger, under Cost by activity, {words.Bar} budget.</p>}
       {error && <p className="text-xs text-red-500">{error}</p>}
       <p className="text-xs text-muted" data-note>{rateNote(view.rate_source)}</p>
 

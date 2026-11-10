@@ -110,18 +110,23 @@ impl TriggerConfig {
     /// What the parser needs: the on adapters' opening lines, and their
     /// bookkeeping paths with the root they must be under.
     pub fn matcher(&self, home: Option<&Path>) -> Matcher {
+        let home_s = home.map(|h| crate::paths::slash(h.to_string_lossy().trim_end_matches('/')));
         Matcher {
             prompts: self.enabled().flat_map(|a| a.prompt_triggers.iter().cloned()).collect(),
-            home: home.map(|h| h.to_string_lossy().trim_end_matches('/').to_string()),
             paths: self
                 .enabled()
                 .filter(|a| !a.bookkeeping_paths.is_empty())
                 .map(|a| Anchored {
-                    root: a.root.as_deref().map(|r| expand(r, home).to_string_lossy().trim_end_matches('/').to_string()),
+                    // `~/x` joined with `/` as a string, so the root reads the same on every OS.
+                    root: a.root.as_deref().map(|r| match (r.strip_prefix('~'), &home_s) {
+                        (Some(rest), Some(h)) => format!("{h}/{}", rest.trim_start_matches('/')).trim_end_matches('/').to_string(),
+                        _ => crate::paths::slash(r.trim_end_matches('/')),
+                    }),
                     root_as_written: a.root.as_deref().map(|r| r.trim_end_matches('/').to_string()),
                     patterns: a.bookkeeping_paths.clone(),
                 })
                 .collect(),
+            home: home_s,
         }
     }
 
@@ -458,6 +463,16 @@ mod tests {
         assert!(err.contains("Fix or delete the file"), "{err}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ broken", "the user's file is not replaced");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn windows_paths_are_read_as_their_git_bash_form() {
+        let m = md_on().matcher(Some(Path::new(r"C:\Users\me")));
+        let agent = crate::paths::slash(r"C:\Users\me\HarnessAgents\hive\agents\a");
+        assert!(m.is_bookkeeping(&crate::paths::slash(r"C:\Users\me\HarnessAgents\hive\board.md"), ""));
+        assert!(m.is_bookkeeping("cat /c/Users/me/HarnessAgents/hive/board.md", "/r"));
+        assert!(m.is_bookkeeping("echo x >> memory.md", &agent));
+        assert!(!m.is_bookkeeping(&crate::paths::slash(r"C:\Users\me\dev\app\memory.md"), ""));
     }
 
     #[test]

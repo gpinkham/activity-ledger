@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "test:ui": "node --test test/",
+    "test:ui": "node --test \"test/*.test.mjs\"",
     "preview": "vite preview",
     "tauri": "tauri",
     "build:universal": "tauri build --target universal-apple-darwin"

@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildSync } from "esbuild";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -21,7 +21,7 @@ const build = (entry, name) => {
     bundle: true, format: "esm", platform: "node", jsx: "automatic", outfile,
     external: ["react", "react-dom", "react/jsx-runtime"], logLevel: "silent",
   });
-  return outfile;
+  return pathToFileURL(outfile).href;
 };
 const G = await import(build("../src/lib/gauge.ts", "gauge.mjs"));
 const { TrayPanel } = await import(build("../src/screens/TrayPanel.tsx", "TrayPanel.mjs"));
@@ -158,4 +158,12 @@ test("no en or em dashes in what the panel or the budget card say", async () => 
     const text = readFileSync(new URL(f, import.meta.url), "utf8");
     assert.ok(!/[\u2013\u2014]/.test(text), f);
   }
+});
+
+test("the platform words come from the webview's user agent", () => {
+  assert.equal(G.platformOf("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15"), "macos");
+  assert.equal(G.platformOf("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Edg/120.0"), "windows");
+  assert.equal(G.platformOf("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15"), "linux");
+  assert.equal(G.platformOf(""), "macos", "unknown: the macOS words, as before");
+  for (const p of ["macos", "windows", "linux"]) assert.ok(G.PLATFORM_WORDS[p].bar, p);
 });

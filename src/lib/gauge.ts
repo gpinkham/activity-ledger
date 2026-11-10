@@ -4,10 +4,26 @@ import type { BudgetView, GaugeView, Ring } from "./types";
 
 export const money = (n: number) => `$${n.toFixed(2)}`;
 
+/** The words for where the ring lives, per platform. Add a row for a new platform. */
+export type Platform = "macos" | "windows" | "linux";
+export const PLATFORM_WORDS: Record<Platform, { machine: string; bar: string; Bar: string; dock: string }> = {
+  macos: { machine: "Mac", bar: "menu bar", Bar: "Menu bar", dock: "Dock" },
+  windows: { machine: "PC", bar: "system tray", Bar: "System tray", dock: "taskbar" },
+  linux: { machine: "computer", bar: "system tray", Bar: "System tray", dock: "taskbar" },
+};
+
+/** This platform, from the webview's user agent; macOS when it cannot tell (as in the tests). */
+export function platformOf(userAgent: string): Platform {
+  if (/Windows/.test(userAgent)) return "windows";
+  if (/Linux|X11/.test(userAgent) && !/Android/.test(userAgent)) return "linux";
+  return "macos";
+}
+export const words = PLATFORM_WORDS[platformOf(typeof navigator !== "undefined" ? navigator.userAgent : "")];
+
 /** The line under every figure: what the numbers are, and what they leave out. */
 export function rateNote(source: GaugeView["rate_source"]): string {
   const rates = source === "configured" ? "at configured rates" : "at list price";
-  return `Estimate ${rates}, this Mac only, Claude Code only.`;
+  return `Estimate ${rates}, this ${words.machine} only, Claude Code only.`;
 }
 
 export function ringWord(ring: Ring): string {

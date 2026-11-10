@@ -144,9 +144,19 @@ pub struct Tally {
     calls: HashMap<String, HashMap<PathBuf, Call>>,
 }
 
+#[cfg(unix)]
 fn file_id(meta: &std::fs::Metadata) -> (u64, u64) {
     use std::os::unix::fs::MetadataExt;
     (meta.dev(), meta.ino())
+}
+
+/// No inode to read on stable Rust here: the creation time stands in, as a file
+/// that replaced another under the same name was created later. The head and
+/// tail checks in read_file still catch a rewrite in place.
+#[cfg(not(unix))]
+fn file_id(meta: &std::fs::Metadata) -> (u64, u64) {
+    let created = meta.created().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
+    (0, created.map_or(0, |d| d.as_nanos() as u64))
 }
 
 fn mtime_of(meta: &std::fs::Metadata) -> i64 {
@@ -178,11 +188,16 @@ impl Tally {
     /// Read what changed under `root` since the last poll. Only files written this
     /// local month are looked at: an older file holds only older calls.
     pub fn poll(&mut self, root: &Path, clock: &dyn Clock) -> PollStats {
+        self.poll_roots(&[root.to_path_buf()], clock)
+    }
+
+    /// poll, over every transcript folder at once (a file gone from all of them is forgotten).
+    pub fn poll_roots(&mut self, roots: &[PathBuf], clock: &dyn Clock) -> PollStats {
         let month_start = first_of_month(clock.today());
         let since = clock.start_of(month_start).timestamp();
         let mut stats = PollStats::default();
         let mut live: HashSet<PathBuf> = HashSet::new();
-        for sf in scan_dir(root) {
+        for sf in roots.iter().flat_map(|r| scan_dir(r)) {
             if sf.mtime < since {
                 continue;
             }
