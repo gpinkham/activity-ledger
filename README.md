@@ -78,10 +78,11 @@ Download the signed app from the [latest release](https://github.com/gpinkham/ac
 
 ### Requirements
 
-- macOS (the app is developed and tested there; other platforms are untested)
+- macOS or Windows 10/11 (other platforms are untested)
 - [Rust](https://rustup.rs) (stable)
 - [Node.js](https://nodejs.org) 20 or later
-- Xcode Command Line Tools: `xcode-select --install`
+- On macOS: Xcode Command Line Tools: `xcode-select --install`
+- On Windows: [Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) ("Desktop development with C++") and WebView2, which Windows 10 and 11 already have
 
 ### Build
 
@@ -99,6 +100,8 @@ npm run build:universal
 ```
 
 The built app is under `src-tauri/target/.../bundle/macos/`. A build you make yourself is not signed or notarized, so the first time you open it, right click it and choose **Open**. The download from the releases page needs no such step.
+
+On Windows, `npm run tauri build` makes an MSI and a setup `.exe` under `src-tauri/target/release/bundle/msi/` and `bundle/nsis/`. They are not signed, so SmartScreen warns the first time; choose **More info**, then **Run anyway**. There the budget ring sits in the system tray, its panel opens above the taskbar, and transcripts are read from `%USERPROFILE%\.claude\projects` and, for Claude Code run inside WSL, from each WSL distro's `~/.claude/projects` (found with `wsl.exe -l -q`; reading one may start that distro). CI builds both platforms on every push (`.github/workflows/build.yml`).
 
 ### Signed build (maintainers)
 

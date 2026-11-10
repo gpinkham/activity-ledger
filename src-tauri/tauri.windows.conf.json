@@ -1,0 +1,12 @@
+{
+  "app": {
+    "windows": [
+      {
+        "title": "Activity Ledger",
+        "width": 800,
+        "height": 600,
+        "maximized": true
+      }
+    ]
+  }
+}

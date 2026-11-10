@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChartCard } from "./ChartCard";
 import { getSettings, setSettings } from "../lib/ipc";
-import { cardDraft, checkBudget } from "../lib/gauge";
+import { cardDraft, checkBudget, words } from "../lib/gauge";
 import { BUDGET_FIELDS, withOwnFields } from "../lib/settings";
 import type { AppSettings } from "../lib/types";
 
@@ -31,8 +31,8 @@ export function BudgetCard() {
   const daily = draft.monthly_budget_usd > 0 ? draft.monthly_budget_usd / 30.4 : 0;
 
   return (
-    <ChartCard title="Menu bar budget"
-      subtitle="A ring in the menu bar for today's spend against a monthly budget. An estimate from this Mac's Claude Code transcripts only.">
+    <ChartCard title={`${words.Bar} budget`}
+      subtitle={`A ring in the ${words.bar} for today's spend against a monthly budget. An estimate from this ${words.machine}'s Claude Code transcripts only.`}>
       <div className="grid grid-cols-3 gap-2 text-sm">
         <label className="text-muted">Monthly budget ($)
           <input type="number" min={0} step="1" className={field} value={draft.monthly_budget_usd}
@@ -49,12 +49,12 @@ export function BudgetCard() {
       </div>
       <label className="mt-3 flex items-center gap-2 text-sm text-ink">
         <input type="checkbox" checked={draft.show_in_menu_bar} onChange={(e) => set("show_in_menu_bar", e.target.checked)} />
-        Show in menu bar (off by default)
+        Show in {words.bar} (off by default)
       </label>
       <div className="mt-3 text-xs text-muted leading-relaxed">
         <p>Today&apos;s allowance is the budget spread evenly over the calendar month{daily > 0 ? `, about $${daily.toFixed(2)} a day` : ""}. Days start at local midnight.</p>
-        <p>With the menu bar on, closing this window keeps Activity Ledger in the menu bar, out of the Dock. Click the ring for today&apos;s figures; its menu reopens this window or quits.</p>
-        <p>Rates come from Claude Code&apos;s managed <code>modelPricing</code> setting when this Mac has one, otherwise from the price table. Nothing is sent anywhere.</p>
+        <p>With the {words.bar} on, closing this window keeps Activity Ledger in the {words.bar}, out of the {words.dock}. Click the ring for today&apos;s figures; its menu reopens this window or quits.</p>
+        <p>Rates come from Claude Code&apos;s managed <code>modelPricing</code> setting when this {words.machine} has one, otherwise from the price table. Nothing is sent anywhere.</p>
       </div>
       <button onClick={() => saveMut.mutate(withOwnFields(qc.getQueryData<AppSettings>(["settings"]), draft, BUDGET_FIELDS))} disabled={saveMut.isPending || problem !== null}
         className="mt-3 px-3 py-1 rounded-md text-white shadow-glow disabled:opacity-50"

@@ -149,7 +149,13 @@ fn toggle_panel(app: &AppHandle, rect: tauri::Rect) {
         .or_else(|| panel.current_monitor().ok().flatten())
         .map(|m| (m.position().x as f64, m.size().width as f64));
     let x = panel_x(centre, PANEL_W * scale, screen);
-    let _ = panel.set_position(tauri::PhysicalPosition::new(x, pos.y + size.height));
+    let screen_y = panel
+        .monitor_from_point(centre, pos.y)
+        .ok()
+        .flatten()
+        .map(|m| (m.position().y as f64, m.size().height as f64));
+    let y = panel_y(pos.y, size.height, PANEL_H * scale, screen_y);
+    let _ = panel.set_position(tauri::PhysicalPosition::new(x, y));
     let _ = panel.show();
     let _ = panel.set_focus();
     // The panel reloads its figures when it is shown.
@@ -173,6 +179,16 @@ fn panel_x(centre: f64, panel_w: f64, screen: Option<(f64, f64)>) -> f64 {
     match screen {
         Some((left, width)) => x.min(left + width - panel_w).max(left),
         None => x.max(0.0),
+    }
+}
+
+/// The panel's top edge, in physical pixels: under the icon (a menu bar at the
+/// top, as on macOS), or above it when the icon is in the lower half of its
+/// screen `(top, height)` (a taskbar at the bottom, as on Windows).
+fn panel_y(icon_y: f64, icon_h: f64, panel_h: f64, screen: Option<(f64, f64)>) -> f64 {
+    match screen {
+        Some((top, height)) if icon_y > top + height / 2.0 => (icon_y - panel_h).max(top),
+        _ => icon_y + icon_h,
     }
 }
 
@@ -279,6 +295,14 @@ mod tests {
         assert_eq!(panel_x(1450.0, 600.0, second), 1440.0);
         assert_eq!(panel_x(5000.0, 300.0, None), 4850.0, "no screen known: only kept at or right of 0");
         assert_eq!(panel_x(10.0, 300.0, None), 0.0);
+    }
+
+    #[test]
+    fn the_panel_opens_under_a_top_bar_and_above_a_bottom_taskbar() {
+        assert_eq!(panel_y(0.0, 24.0, 400.0, Some((0.0, 900.0))), 24.0, "menu bar: under the icon");
+        assert_eq!(panel_y(0.0, 24.0, 400.0, None), 24.0, "no screen known: under, as before");
+        assert_eq!(panel_y(1040.0, 40.0, 400.0, Some((0.0, 1080.0))), 640.0, "taskbar: above the icon");
+        assert_eq!(panel_y(2120.0, 40.0, 400.0, Some((1080.0, 1080.0))), 1720.0, "a second screen below the first");
     }
 
     fn pixel(px: &[u8], x: usize, y: usize) -> [u8; 4] {

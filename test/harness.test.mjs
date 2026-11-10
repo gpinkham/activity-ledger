@@ -5,12 +5,13 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { transformSync } from "esbuild";
 
 const src = readFileSync(new URL("../src/lib/harness.ts", import.meta.url), "utf8");
 const out = join(mkdtempSync(join(tmpdir(), "al-ui-")), "harness.mjs");
 writeFileSync(out, transformSync(src, { loader: "ts", format: "esm" }).code);
-const H = await import(out);
+const H = await import(pathToFileURL(out).href);
 
 const md = (enabled, found) => ({ name: "Munder Difflin", enabled, root: "~/HarnessAgents/hive", found });
 

@@ -67,6 +67,50 @@ pub fn scan_dir(root: &Path) -> Vec<ScannedFile> {
     out
 }
 
+/// Where Claude Code keeps transcripts on this machine: `~/.claude/projects`, plus,
+/// where WSL is installed, each WSL user's own (`\\wsl.localhost\<distro>\home\<user>\.claude\projects`),
+/// for Claude Code run inside WSL. Only folders that exist are added after the first.
+pub fn claude_roots(home: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![home.join(".claude").join("projects")];
+    for distro in wsl_distros() {
+        let base = PathBuf::from(format!(r"\\wsl.localhost\{distro}"));
+        let homes: Vec<PathBuf> = std::fs::read_dir(base.join("home")).into_iter().flatten().flatten().map(|e| e.path()).chain([base.join("root")]).collect();
+        roots.extend(homes.into_iter().map(|h| h.join(".claude").join("projects")).filter(|p| p.is_dir()));
+    }
+    roots
+}
+
+/// The WSL distros, from `wsl.exe -l -q`, without opening a console window.
+#[cfg(windows)]
+fn wsl_distros() -> Vec<String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    std::process::Command::new("wsl.exe")
+        .args(["-l", "-q"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map(|o| parse_wsl_list(&o.stdout))
+        .unwrap_or_default()
+}
+
+/// No WSL here.
+#[cfg(not(windows))]
+fn wsl_distros() -> Vec<String> {
+    Vec::new()
+}
+
+/// `wsl.exe -l -q` writes UTF-16: one distro per line. Docker Desktop's own distros
+/// hold no transcripts and are left alone.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn parse_wsl_list(out: &[u8]) -> Vec<String> {
+    let units: Vec<u16> = out.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    String::from_utf16_lossy(&units)
+        .lines()
+        .map(|l| l.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}' || c == '\0').to_string())
+        .filter(|l| !l.is_empty() && !l.starts_with("docker-desktop"))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,6 +136,19 @@ mod tests {
         assert_eq!(meta.agent_type.as_deref(), Some("Explore"));
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_wsl_list_is_read_from_utf16() {
+        let utf16 = |s: &str| s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect::<Vec<u8>>();
+        assert_eq!(parse_wsl_list(&utf16("\u{feff}Ubuntu\r\ndocker-desktop\r\nDebian\r\n\r\n")), vec!["Ubuntu", "Debian"]);
+        assert!(parse_wsl_list(&[]).is_empty());
+    }
+
+    #[test]
+    fn the_first_root_is_always_the_home_folders() {
+        let home = Path::new("/h");
+        assert_eq!(claude_roots(home)[0], home.join(".claude").join("projects"));
     }
 
     #[test]

@@ -559,7 +559,8 @@ mod tests {
     #[test]
     fn nothing_listening_is_reported_as_connection_refused() {
         let port = { let l = TcpListener::bind("127.0.0.1:0").unwrap(); l.local_addr().unwrap().port() };
-        let err = chat_label(&check_url(&format!("http://127.0.0.1:{port}"), false).unwrap(), "m", "s", 4096, T).unwrap_err();
+        // The app's own connect timeout: Windows retries a refused loopback connect for about 2 s.
+        let err = chat_label(&check_url(&format!("http://127.0.0.1:{port}"), false).unwrap(), "m", "s", 4096, CONNECT_TIMEOUT).unwrap_err();
         assert!(err.contains("connection refused") && err.contains("Is Ollama running"), "{err}");
     }
 

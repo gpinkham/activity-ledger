@@ -1,0 +1,5 @@
+# LF everywhere, so a Windows checkout keeps the fixtures and the golden report byte-identical.
+* text=auto eol=lf
+*.png binary
+*.icns binary
+*.ico binary
