@@ -53,7 +53,7 @@ export function BudgetCard() {
       </label>
       <div className="mt-3 text-xs text-muted leading-relaxed">
         <p>Today&apos;s allowance is the budget spread evenly over the calendar month{daily > 0 ? `, about $${daily.toFixed(2)} a day` : ""}. Days start at local midnight.</p>
-        <p>With the {words.bar} on, closing this window keeps Activity Ledger in the {words.bar}, out of the {words.dock}. Click the ring for today&apos;s figures; its menu reopens this window or quits.</p>
+        <p>With the {words.bar} on, closing this window keeps Activity Ledger in the {words.bar}, out of the {words.dock}. Click the ring for today&apos;s figures, with buttons to reopen this window or quit.</p>
         <p>Rates come from Claude Code&apos;s managed <code>modelPricing</code> setting when this {words.machine} has one, otherwise from the price table. Nothing is sent anywhere.</p>
       </div>
       <button onClick={() => saveMut.mutate(withOwnFields(qc.getQueryData<AppSettings>(["settings"]), draft, BUDGET_FIELDS))} disabled={saveMut.isPending || problem !== null}
