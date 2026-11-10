@@ -1,10 +1,10 @@
 // The panel window under the menu bar ring (index.html#tray). It reloads its
 // figures each time it is shown and once a minute while it is open, and does
 // nothing while it is hidden (tray.rs sends gauge-shown and gauge-hidden).
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { panelPoller } from "../lib/gauge";
-import { getGauge, getGaugeSplit, openMainWindow, openWeeklyReport, quitApp } from "../lib/ipc";
+import { fitPanel, getGauge, getGaugeSplit, openMainWindow, openWeeklyReport, quitApp } from "../lib/ipc";
 import type { GaugeView, WorkSplit } from "../lib/types";
 import { TrayPanel } from "./TrayPanel";
 
@@ -12,6 +12,7 @@ export default function TrayApp() {
   const [view, setView] = useState<GaugeView | null>(null);
   const [split, setSplit] = useState<WorkSplit | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const box = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async () => {
     try {
@@ -37,6 +38,29 @@ export default function TrayApp() {
     };
   }, [load]);
 
-  return <TrayPanel view={view} split={split} error={error} onOpen={() => void openMainWindow()} onSaveReport={() => void openWeeklyReport()}
-    onQuit={() => void quitApp()} />;
+  // The window takes the height of what it shows, so a row or button added later,
+  // a wrapped line or the loading state never leaves a scrollbar or empty space.
+  useEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    let last = 0;
+    const fit = () => {
+      const h = Math.ceil(el.getBoundingClientRect().height);
+      if (h > 0 && h !== last) {
+        last = h;
+        void fitPanel(h);
+      }
+    };
+    const watch = new ResizeObserver(fit);
+    watch.observe(el);
+    fit();
+    return () => watch.disconnect();
+  }, []);
+
+  return (
+    <div ref={box}>
+      <TrayPanel view={view} split={split} error={error} onOpen={() => void openMainWindow()} onSaveReport={() => void openWeeklyReport()}
+        onQuit={() => void quitApp()} />
+    </div>
+  );
 }

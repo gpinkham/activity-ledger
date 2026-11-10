@@ -16,6 +16,7 @@
 use crate::budget::Ring;
 use crate::commands::{gauge_view, AppState};
 use crate::gauge::SystemClock;
+use std::sync::Mutex;
 use tauri::image::Image;
 use tauri::tray::{MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
@@ -23,7 +24,13 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 pub const TRAY_ID: &str = "gauge";
 const PANEL: &str = "tray-panel";
 const PANEL_W: f64 = 320.0;
-const PANEL_H: f64 = 400.0;
+/// The panel's height before its page has measured itself; after that the page
+/// sets it to fit its content (`fit_panel`), so a new row never needs a scrollbar.
+const PANEL_H: f64 = 480.0;
+/// Bounds on a measured height, so a bad measurement cannot hide the panel or
+/// run it off the screen. Past the top bound the page scrolls.
+const PANEL_MIN_H: f64 = 120.0;
+const PANEL_MAX_H: f64 = 800.0;
 pub const POLL_SECS: u64 = 60;
 /// The icon in pixels: a 22 point menu bar slot at 2x.
 pub const ICON: u32 = 44;
@@ -99,6 +106,35 @@ pub fn show_main(app: &AppHandle) {
     }
 }
 
+/// The panel's current height in logical points, and the icon it was last opened
+/// under, so a resize can keep it in place.
+static PANEL_HEIGHT: Mutex<f64> = Mutex::new(PANEL_H);
+static ICON_RECT: Mutex<Option<tauri::Rect>> = Mutex::new(None);
+
+/// A height the page measured, in logical points, as the window height to use:
+/// rounded up so the last pixel row is not cut, and kept within the bounds.
+fn panel_height(measured: f64) -> f64 {
+    if measured.is_finite() {
+        measured.ceil().clamp(PANEL_MIN_H, PANEL_MAX_H)
+    } else {
+        PANEL_H
+    }
+}
+
+/// The page measured its content: size the window to it and keep it placed
+/// against the icon (under it, or above a bottom taskbar).
+pub fn fit_panel(app: &AppHandle, measured: f64) {
+    let h = panel_height(measured);
+    if let Ok(mut cur) = PANEL_HEIGHT.lock() {
+        *cur = h;
+    }
+    let Some(panel) = app.get_webview_window(PANEL) else { return };
+    let _ = panel.set_size(tauri::LogicalSize::new(PANEL_W, h));
+    if let Some(rect) = ICON_RECT.lock().ok().and_then(|r| *r) {
+        place_panel(&panel, rect, h);
+    }
+}
+
 /// Hide the panel and tell it so, so it stops refreshing until it is shown again.
 fn hide_panel(panel: &tauri::WebviewWindow) {
     let _ = panel.hide();
@@ -109,9 +145,10 @@ fn toggle_panel(app: &AppHandle, rect: tauri::Rect) {
     let panel = match app.get_webview_window(PANEL) {
         Some(p) => p,
         None => {
+            let h = PANEL_HEIGHT.lock().map(|h| *h).unwrap_or(PANEL_H);
             let Ok(p) = WebviewWindowBuilder::new(app, PANEL, WebviewUrl::App("index.html#tray".into()))
                 .title("Activity Ledger budget")
-                .inner_size(PANEL_W, PANEL_H)
+                .inner_size(PANEL_W, h)
                 .resizable(false)
                 .decorations(false)
                 .always_on_top(true)
@@ -137,6 +174,20 @@ fn toggle_panel(app: &AppHandle, rect: tauri::Rect) {
         hide_panel(&panel);
         return;
     }
+    if let Ok(mut r) = ICON_RECT.lock() {
+        *r = Some(rect);
+    }
+    let h = PANEL_HEIGHT.lock().map(|h| *h).unwrap_or(PANEL_H);
+    place_panel(&panel, rect, h);
+    let _ = panel.show();
+    let _ = panel.set_focus();
+    // The panel reloads its figures when it is shown.
+    let _ = tauri::Emitter::emit_to(app, PANEL, "gauge-shown", ());
+}
+
+/// Put a panel `panel_h` logical points tall against the icon at `rect`: centred
+/// on it, kept on its screen, under it or above a bottom taskbar.
+fn place_panel(panel: &tauri::WebviewWindow, rect: tauri::Rect, panel_h: f64) {
     // Centred under the icon, kept on the icon's screen.
     let scale = panel.scale_factor().unwrap_or(1.0);
     let pos = rect.position.to_physical::<f64>(scale);
@@ -154,12 +205,8 @@ fn toggle_panel(app: &AppHandle, rect: tauri::Rect) {
         .ok()
         .flatten()
         .map(|m| (m.position().y as f64, m.size().height as f64));
-    let y = panel_y(pos.y, size.height, PANEL_H * scale, screen_y);
+    let y = panel_y(pos.y, size.height, panel_h * scale, screen_y);
     let _ = panel.set_position(tauri::PhysicalPosition::new(x, y));
-    let _ = panel.show();
-    let _ = panel.set_focus();
-    // The panel reloads its figures when it is shown.
-    let _ = tauri::Emitter::emit_to(app, PANEL, "gauge-shown", ());
 }
 
 /// Where the icon is, when `e` is the release of any mouse button on it: the
@@ -209,6 +256,8 @@ pub fn sync(app: &AppHandle) -> tauri::Result<()> {
             })
             .build(app)?;
         refresh_icon(app);
+        #[cfg(debug_assertions)]
+        open_panel_for_debugging(app);
     } else if !on && present {
         app.remove_tray_by_id(TRAY_ID);
         if let Some(p) = app.get_webview_window(PANEL) {
@@ -218,6 +267,25 @@ pub fn sync(app: &AppHandle) -> tauri::Result<()> {
         show_main(app);
     }
     Ok(())
+}
+
+/// Debug builds only: with AL_DEBUG_OPEN_PANEL set, open the panel a moment after
+/// the icon appears, so its layout can be checked without a mouse.
+#[cfg(debug_assertions)]
+fn open_panel_for_debugging(app: &AppHandle) {
+    if std::env::var_os("AL_DEBUG_OPEN_PANEL").is_none() {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if let Some(rect) = handle.tray_by_id(TRAY_ID).and_then(|t| t.rect().ok().flatten()) {
+                toggle_panel(&handle, rect);
+            }
+        });
+    });
 }
 
 /// With the gauge on, closing the main window hides it and leaves the Dock; the
@@ -281,6 +349,18 @@ mod tests {
         assert!(panel_click(&TrayIconEvent::Enter { id: id.clone(), position, rect }).is_none());
         assert!(panel_click(&TrayIconEvent::Move { id: id.clone(), position, rect }).is_none());
         assert!(panel_click(&TrayIconEvent::Leave { id, position, rect }).is_none());
+    }
+
+    #[test]
+    fn the_panel_takes_the_measured_height_within_bounds() {
+        assert_eq!(panel_height(523.0), 523.0);
+        assert_eq!(panel_height(522.2), 523.0, "rounded up, so the last row is not cut");
+        assert_eq!(panel_height(40.0), PANEL_MIN_H, "too small to be real");
+        assert_eq!(panel_height(0.0), PANEL_MIN_H);
+        assert_eq!(panel_height(-5.0), PANEL_MIN_H);
+        assert_eq!(panel_height(5000.0), PANEL_MAX_H, "past the bound the page scrolls instead");
+        assert_eq!(panel_height(f64::NAN), PANEL_H);
+        assert_eq!(panel_height(f64::INFINITY), PANEL_H);
     }
 
     #[test]

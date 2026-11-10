@@ -348,6 +348,13 @@ pub fn open_main_window(app: tauri::AppHandle) {
 
 /// The panel's "Quit Activity Ledger". The menu bar icon has no menu of its own
 /// (tray.rs), so this is how the app is quit while it lives in the menu bar.
+/// The panel page's content height in logical points; the panel window is sized
+/// to it (tray.rs `fit_panel`), so it never needs a scrollbar.
+#[tauri::command]
+pub fn fit_panel(app: tauri::AppHandle, height: f64) {
+    crate::tray::fit_panel(&app, height);
+}
+
 #[tauri::command]
 pub fn quit_app(app: tauri::AppHandle) {
     app.exit(0);
