@@ -336,7 +336,11 @@ pub fn work_split(state: &AppState, clock: &dyn Clock) -> Result<WorkSplit, Stri
     Ok(WorkSplit { work_usd: all - overhead, overhead_usd: overhead })
 }
 
-#[tauri::command]
+/// Runs off the main thread (`async`): it brings the whole cache up to date, which
+/// can take seconds, and on the main thread it held up every window call in the
+/// meantime, the panel's `fit_panel` among them, so the panel sat at its loading
+/// height with a scrollbar until the split came back.
+#[tauri::command(async)]
 pub fn get_gauge_split(state: tauri::State<AppState>) -> Result<WorkSplit, String> {
     work_split(&state, &SystemClock)
 }
@@ -499,6 +503,17 @@ mod tests {
         assert_eq!(gauge_view(&state, &next, true).unwrap().budget.today, 0.0);
         assert_eq!(work_split(&state, &next).unwrap(), WorkSplit { work_usd: 0.0, overhead_usd: 0.0 });
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_split_runs_off_the_main_thread() {
+        // A text check, not a behaviour one: on the main thread the split held up
+        // fit_panel, and the panel sat at its loading height with a scrollbar.
+        let src = include_str!("commands.rs");
+        assert!(
+            src.contains("#[tauri::command(async)]\npub fn get_gauge_split("),
+            "get_gauge_split must stay #[tauri::command(async)]"
+        );
     }
 
     #[test]
