@@ -506,6 +506,17 @@ mod tests {
     }
 
     #[test]
+    fn the_split_runs_off_the_main_thread() {
+        // A text check, not a behaviour one: on the main thread the split held up
+        // fit_panel, and the panel sat at its loading height with a scrollbar.
+        let src = include_str!("commands.rs");
+        assert!(
+            src.contains("#[tauri::command(async)]\npub fn get_gauge_split("),
+            "get_gauge_split must stay #[tauri::command(async)]"
+        );
+    }
+
+    #[test]
     fn a_managed_model_pricing_file_switches_the_rates_and_the_label() {
         let dir = std::env::temp_dir().join(format!("ci_gauge_managed_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
