@@ -1,6 +1,6 @@
 [package]
 name = "activity-ledger"
-version = "0.3.1"
+version = "0.3.2"
 description = "A local desktop app that shows what your Claude Code sessions cost, by kind of work."
 authors = ["Pinkham Software"]
 license = "MIT"
