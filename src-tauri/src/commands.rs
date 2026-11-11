@@ -235,6 +235,10 @@ enum Folders {
 }
 
 /// Change the settings with `edit`, save them, and bring the folders up to date.
+/// Every command that calls it is `#[tauri::command(async)]`: a folder change
+/// re-reads the cache (and on Windows can look in WSL), and each one repaints the
+/// tray icon, which polls the transcript folders. On the main thread that would
+/// hold up every window call meanwhile, as get_gauge_split did.
 fn edit_settings(app: &tauri::AppHandle, state: &AppState, folders: Folders, edit: impl FnOnce(&mut AppSettings)) -> Result<Vec<Account>, String> {
     let next = {
         let mut settings = state.settings.lock().map_err(|e| e.to_string())?;
@@ -262,7 +266,7 @@ fn edit_settings(app: &tauri::AppHandle, state: &AppState, folders: Folders, edi
 
 /// Save one account's name, colour, hidden flag and budget. Only that account's
 /// entry is written, so a change made elsewhere is not undone.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_account_settings(app: tauri::AppHandle, state: tauri::State<AppState>, id: String, settings: AccountSettings) -> Result<Vec<Account>, String> {
     edit_settings(&app, &state, Folders::Same, |s| {
         let mut settings = settings;
@@ -272,7 +276,7 @@ pub fn set_account_settings(app: tauri::AppHandle, state: tauri::State<AppState>
 }
 
 /// Count a config folder in another account, or (none) in the one its login gives it.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_dir_account(app: tauri::AppHandle, state: tauri::State<AppState>, dir: String, account: Option<String>) -> Result<Vec<Account>, String> {
     edit_settings(&app, &state, Folders::Reassign, |s| match account {
         Some(a) => {
@@ -286,7 +290,7 @@ pub fn set_dir_account(app: tauri::AppHandle, state: tauri::State<AppState>, dir
 
 /// Read a config folder that was not found on its own (a `CLAUDE_CONFIG_DIR`
 /// outside the home folder). Refused unless it holds a `projects` folder.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn add_config_dir(app: tauri::AppHandle, state: tauri::State<AppState>, path: String) -> Result<Vec<Account>, String> {
     let dir = crate::accounts::custom_dir(&path)
         .ok_or_else(|| format!("{path} has no projects folder: not a Claude Code config folder"))?;
@@ -298,7 +302,7 @@ pub fn add_config_dir(app: tauri::AppHandle, state: tauri::State<AppState>, path
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn remove_config_dir(app: tauri::AppHandle, state: tauri::State<AppState>, path: String) -> Result<Vec<Account>, String> {
     let removed = path.clone();
     let accounts = edit_settings(&app, &state, Folders::Rescan, |s| {
@@ -324,7 +328,7 @@ pub fn forget_unread_dir(state: &AppState, dir: &str) -> Result<(), String> {
 }
 
 /// The account the menu bar ring follows; none is every account.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_tray_account(app: tauri::AppHandle, state: tauri::State<AppState>, account: Option<String>) -> Result<Vec<Account>, String> {
     edit_settings(&app, &state, Folders::Same, |s| s.tray_account = account)
 }
@@ -926,6 +930,15 @@ mod tests {
             src.contains("#[tauri::command(async)]\npub fn get_gauge_split("),
             "get_gauge_split must stay #[tauri::command(async)]"
         );
+    }
+
+    #[test]
+    fn the_account_settings_commands_run_off_the_main_thread() {
+        // The same text check: each re-reads folders or polls them for the tray icon.
+        let src = include_str!("commands.rs");
+        for cmd in ["set_account_settings", "set_dir_account", "add_config_dir", "remove_config_dir", "set_tray_account"] {
+            assert!(src.contains(&format!("#[tauri::command(async)]\npub fn {cmd}(")), "{cmd} must be #[tauri::command(async)]");
+        }
     }
 
     #[test]
