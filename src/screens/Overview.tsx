@@ -1,11 +1,62 @@
 import { useQuery } from "@tanstack/react-query";
+import { AccountDot, useAccounts } from "../components/Accounts";
+import { accountDetail, showAccountChips, visibleAccounts } from "../lib/accounts";
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
-import { getTotals, getByDay } from "../lib/ipc";
+import { getTotals, getByDay, getByAccount } from "../lib/ipc";
 import { useFilters } from "../state/filters";
 import { KpiRow } from "../components/KpiRow";
 import { ChartCard } from "../components/ChartCard";
 import { useChartTokens, VGradient } from "../lib/chart-theme";
 import { usd, compact, pct } from "../lib/format";
+
+/** With every account shown, each account's share of the cost, in its own colour.
+ *  A row picks that account. */
+function ByAccount() {
+  const { filters, setAccount } = useFilters();
+  const accounts = useAccounts();
+  const visible = visibleAccounts(accounts.data);
+  const show = showAccountChips(accounts.data, filters.account);
+  const split = useQuery({
+    queryKey: ["byAccount", filters],
+    queryFn: () => getByAccount(filters),
+    enabled: show,
+  });
+  if (!show) return null;
+  // An account with nothing in the range is still listed, at $0.
+  const costs = visible.map((a) => {
+    const row = split.data?.find((r) => r.account === a.id);
+    return { a, t: split.data ? { est_cost_usd: row?.cost_usd ?? 0, sessions: row?.sessions ?? 0 } : undefined };
+  });
+  const all = costs.reduce((s, c) => s + (c.t?.est_cost_usd ?? 0), 0);
+  return (
+    <ChartCard title="By account" subtitle="Each Claude account on this machine, apart. Click one to see only its activity.">
+      <div className="flex flex-col gap-2 text-sm">
+        {costs.map(({ a, t }) => {
+          const share = t && all > 0 ? t.est_cost_usd / all : 0;
+          return (
+            <button key={a.id} onClick={() => setAccount(a.id)} data-account={a.id}
+              className="text-left rounded-md px-2 py-1.5 hover:bg-elevated/60">
+              <div className="flex items-baseline justify-between gap-3">
+                <span className="flex items-center gap-2 min-w-0">
+                  <AccountDot colour={a.colour} />
+                  <span className="text-ink truncate">{a.label}</span>
+                  <span className="text-xs text-muted truncate">{accountDetail(a)}</span>
+                </span>
+                <span className="tabular-nums text-ink whitespace-nowrap">
+                  {t ? usd(t.est_cost_usd) : "-"}
+                  <span className="text-muted text-xs"> · {t ? `${compact(t.sessions)} sessions · ${pct(share)}` : ""}</span>
+                </span>
+              </div>
+              <div className="mt-1 h-1.5 rounded-full bg-elevated overflow-hidden">
+                <div className="h-full rounded-full" style={{ width: `${share * 100}%`, background: a.colour }} />
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </ChartCard>
+  );
+}
 
 export default function Overview() {
   const { filters } = useFilters();
@@ -36,6 +87,7 @@ export default function Overview() {
           },
         ]}
       />
+      <ByAccount />
       <ChartCard title="Est. API-equivalent cost over time" subtitle="Shadow cost, not real spend">
         <ResponsiveContainer width="100%" height={260}>
           <AreaChart data={byDay.data ?? []} margin={{ top: 8, right: 16, bottom: 0, left: 0 }}>

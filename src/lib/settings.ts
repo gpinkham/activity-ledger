@@ -4,7 +4,8 @@
 // newest settings it can see with only its own fields taken from its draft.
 import type { AppSettings } from "./types";
 
-export const BUDGET_FIELDS = ["monthly_budget_usd", "amber_pct", "red_pct", "show_in_menu_bar"] as const;
+/** The budget card's own field. Each account's budget is saved apart (set_account_settings). */
+export const BUDGET_FIELDS = ["show_in_menu_bar"] as const;
 export const LOCAL_MODEL_FIELDS = [
   "ollama_url", "ollama_model", "local_context_limit", "local_output_limit",
   "model_labels_enabled", "allow_remote_ollama",

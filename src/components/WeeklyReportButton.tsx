@@ -5,6 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getSettings, saveExport, setReportHideProjects, weeklyReport } from "../lib/ipc";
 import { REPORT_WEEK_LABELS, hideProjectsOf, reportFileName, weekStart, type ReportWeek } from "../lib/report";
 import type { AppSettings } from "../lib/types";
+import { useFilters } from "../state/filters";
 
 /** Saves a week's Markdown report where the user picks. Written only when asked. */
 export function WeeklyReportButton() {
@@ -28,7 +29,9 @@ export function WeeklyReportButton() {
     }
   };
 
-  const run = async (which: ReportWeek) => {
+  // The account picked in the header; the tray asks for the account its ring follows.
+  const { filters } = useFilters();
+  const run = async (which: ReportWeek, account: string | null | undefined = filters.account) => {
     setBusy(true);
     setError(null);
     try {
@@ -36,7 +39,7 @@ export function WeeklyReportButton() {
       // had not loaded yet (the tray can ask before they have).
       const current = await qc.fetchQuery({ queryKey: ["settings"], queryFn: getSettings });
       const monday = weekStart(which, new Date());
-      const md = await weeklyReport(monday, hideProjectsOf(current));
+      const md = await weeklyReport(monday, hideProjectsOf(current), account);
       const path = await save({
         defaultPath: reportFileName(monday),
         filters: [{ name: "Markdown", extensions: ["md"] }],
@@ -53,7 +56,8 @@ export function WeeklyReportButton() {
   const runRef = useRef(run);
   runRef.current = run;
   useEffect(() => {
-    const off = listen("start-weekly-report", () => void runRef.current("last"));
+    const off = listen<{ account?: string | null } | null>("start-weekly-report",
+      (e) => void runRef.current("last", e.payload?.account ?? null));
     return () => {
       off.then((f) => f()).catch(() => {});
     };

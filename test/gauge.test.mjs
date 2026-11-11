@@ -92,7 +92,10 @@ test("with no budget the panel shows the spend, no ring colour, and where to set
   assert.ok(h.includes("No budget set"));
   assert.ok(!h.includes(" of $0.00"), "no allowance to show");
   assert.ok(!h.includes("Pace"), "no pace without a budget");
-  assert.ok(h.includes("Set a monthly budget"));
+  assert.ok(h.includes("Budgets are per account"), "every account together has no budget");
+  const one = html({ view: { ...view(b), account: "acct:a:o", account_label: "Acme" }, split: null });
+  assert.ok(one.includes("Set this account&#x27;s monthly budget"), "one account: where to set its budget");
+  assert.ok(one.includes("Acme"), "and which account it is");
   assert.ok(h.includes("no calls yet"));
   assert.ok(h.includes("Estimate at configured rates, this Mac only, Claude Code only."));
 });
@@ -152,9 +155,23 @@ test("Open and Quit are in the panel in every state", () => {
   assert.ok(!html({ view: null, split: null }).includes("data-quit"), "no Quit when no handler is given");
 });
 
+test("with two accounts or more the panel offers a switcher, and a pick is sent", () => {
+  const accounts = [{ id: "acct:me:o1", label: "Personal", colour: "#3B82F6" }, { id: "acct:me:acme", label: "Acme", colour: "#F59E0B" }];
+  const v = { ...view(budget()), account: "acct:me:acme", account_label: "Acme" };
+  const h = html({ view: v, split: null, accounts, onPickAccount: () => {} });
+  assert.match(h, /data-switcher/);
+  assert.match(h, />All accounts</);
+  assert.match(h, /<option value="acct:me:acme" selected="">Acme<\/option>/, "the account the ring follows is picked");
+  assert.ok(h.includes("#F59E0B"), "in its colour");
+  const single = html({ view: v, split: null, accounts: accounts.slice(0, 1), onPickAccount: () => {} });
+  assert.ok(!single.includes("data-switcher"), "one account: nothing to switch");
+  assert.match(single, /data-account-label[^>]*>Acme</, "but its name still shows");
+});
+
 test("no en or em dashes in what the panel or the budget card say", async () => {
   const { readFileSync } = await import("node:fs");
-  for (const f of ["../src/screens/TrayPanel.tsx", "../src/lib/gauge.ts", "../src/components/BudgetCard.tsx", "../src/screens/TrayApp.tsx"]) {
+  for (const f of ["../src/screens/TrayPanel.tsx", "../src/lib/gauge.ts", "../src/components/BudgetCard.tsx", "../src/screens/TrayApp.tsx",
+    "../src/components/AccountsCard.tsx", "../src/components/Accounts.tsx", "../src/lib/accounts.ts"]) {
     const text = readFileSync(new URL(f, import.meta.url), "utf8");
     assert.ok(!/[\u2013\u2014]/.test(text), f);
   }

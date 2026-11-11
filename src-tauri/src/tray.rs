@@ -73,12 +73,18 @@ pub fn ring_rgba(ring: Ring, share: f64) -> Vec<u8> {
     px
 }
 
-/// "Today $4.10 of $9.68 (42%)", or the spend alone when no budget is set.
-pub fn tooltip(today: f64, allowance: f64, ring: Ring) -> String {
+/// "Today $4.10 of $9.68 (42%)", or the spend alone when no budget is set, for
+/// the account the ring follows, or for all of them when `account` is none.
+pub fn tooltip(today: f64, allowance: f64, ring: Ring, account: Option<&str>) -> String {
+    let who = match account {
+        Some(a) => format!("Activity Ledger · {a}"),
+        None => "Activity Ledger · all accounts".to_string(),
+    };
     if ring == Ring::None {
-        format!("Activity Ledger: today ${today:.2} (no budget set)")
+        let why = if account.is_some() { "no budget set" } else { "budgets are per account" };
+        format!("{who}: today ${today:.2} ({why})")
     } else {
-        format!("Activity Ledger: today ${today:.2} of ${allowance:.2} ({:.0}%)", today / allowance * 100.0)
+        format!("{who}: today ${today:.2} of ${allowance:.2} ({:.0}%)", today / allowance * 100.0)
     }
 }
 
@@ -89,7 +95,8 @@ pub fn refresh_icon(app: &AppHandle) {
     let Ok(v) = gauge_view(&state, &SystemClock, true) else { return };
     let b = &v.budget;
     let _ = tray.set_icon(Some(Image::new_owned(ring_rgba(b.ring, b.today_share), ICON, ICON)));
-    let _ = tray.set_tooltip(Some(tooltip(b.today, b.daily_allowance, b.ring)));
+    let who = v.account_label.as_deref().or(v.account.as_deref());
+    let _ = tray.set_tooltip(Some(tooltip(b.today, b.daily_allowance, b.ring, who)));
 }
 
 /// Show the main window and put the app back in the Dock.
@@ -416,7 +423,8 @@ mod tests {
 
     #[test]
     fn the_tooltip_says_the_share_or_that_no_budget_is_set() {
-        assert_eq!(tooltip(4.1, 9.677, Ring::Green), "Activity Ledger: today $4.10 of $9.68 (42%)");
-        assert_eq!(tooltip(4.1, 0.0, Ring::None), "Activity Ledger: today $4.10 (no budget set)");
+        assert_eq!(tooltip(4.1, 9.677, Ring::Green, Some("Acme")), "Activity Ledger · Acme: today $4.10 of $9.68 (42%)");
+        assert_eq!(tooltip(4.1, 0.0, Ring::None, Some("Personal")), "Activity Ledger · Personal: today $4.10 (no budget set)");
+        assert_eq!(tooltip(6.0, 0.0, Ring::None, None), "Activity Ledger · all accounts: today $6.00 (budgets are per account)");
     }
 }

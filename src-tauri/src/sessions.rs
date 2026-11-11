@@ -9,6 +9,8 @@ use std::collections::BTreeMap;
 pub struct SessionSummary {
     pub session_id: String,
     pub project: String,
+    /// The Claude account it ran in (accounts.rs).
+    pub account: String,
     pub title: Option<String>,
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
@@ -76,6 +78,7 @@ fn duration_secs(started: &Option<String>, ended: &Option<String>) -> i64 {
 // Accumulator used while folding per-(session, model) rows into per-session summaries.
 struct Acc {
     project: String,
+    account: String,
     started: Option<String>,
     ended: Option<String>,
     message_count: i64,
@@ -96,7 +99,7 @@ impl Store {
         let msql = format!(
             "SELECT session_id, project, COALESCE({m},'unknown'), COUNT(*),
                     SUM(input_tokens), SUM(output_tokens), SUM(cache_read),
-                    SUM(ephemeral_1h), SUM(ephemeral_5m), MIN(ts), MAX(ts), SUM(web_searches)
+                    SUM(ephemeral_1h), SUM(ephemeral_5m), MIN(ts), MAX(ts), SUM(web_searches), MIN(account)
              FROM messages {w} GROUP BY session_id, {m}",
             m = price.model_sql()
         );
@@ -106,16 +109,17 @@ impl Store {
                 r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
                 r.get::<_, i64>(3)?, r.get::<_, i64>(4)?, r.get::<_, i64>(5)?, r.get::<_, i64>(6)?,
                 r.get::<_, i64>(7)?, r.get::<_, i64>(8)?, r.get::<_, String>(9)?, r.get::<_, String>(10)?,
-                r.get::<_, i64>(11)?,
+                r.get::<_, i64>(11)?, r.get::<_, String>(12)?,
             ))
         })?;
 
         let mut acc: BTreeMap<String, Acc> = BTreeMap::new();
         for row in rows {
-            let (sid, project, model, msgs, input, output, cr, e1h, e5m, min_ts, max_ts, web) = row?;
+            let (sid, project, model, msgs, input, output, cr, e1h, e5m, min_ts, max_ts, web, account) = row?;
             let tb = TokenBreakdown { input, output, cache_creation_5m: e5m, cache_creation_1h: e1h, cache_read: cr, web_searches: web };
             let a = acc.entry(sid).or_insert(Acc {
                 project,
+                account,
                 started: None,
                 ended: None,
                 message_count: 0,
@@ -167,6 +171,7 @@ impl Store {
                 title: titles.get(&sid).cloned().flatten(),
                 session_id: sid,
                 project: a.project,
+                account: a.account,
                 started_at: a.started,
                 ended_at: a.ended,
                 message_count: a.message_count,
@@ -190,6 +195,7 @@ impl Store {
             .unwrap_or_else(|| SessionSummary {
                 session_id: session_id.to_string(),
                 project: String::new(),
+                account: String::new(),
                 title: None,
                 started_at: None,
                 ended_at: None,
@@ -335,7 +341,7 @@ mod tests {
     fn seeded() -> Store {
         let mut store = Store::open_in_memory();
         let parsed = parse_str("proj-a", include_str!("../tests/fixtures/sample.jsonl"));
-        let sf = ScannedFile { path: "/x/proj-a/s1.jsonl".into(), project: "proj-a".into(), size: 1, mtime: 1, subagent: None };
+        let sf = ScannedFile { path: "/x/proj-a/s1.jsonl".into(), project: "proj-a".into(), size: 1, mtime: 1, subagent: None, account: String::new() };
         store.replace_file(&sf, &parsed).unwrap();
         store.rebuild_sessions().unwrap();
         store
@@ -391,7 +397,7 @@ mod tests {
     fn a_sessions_cost_includes_its_web_searches() {
         let mut store = Store::open_in_memory();
         let content = r#"{"type":"assistant","sessionId":"sw","timestamp":"2026-10-02T12:00:00.000Z","message":{"id":"w1","role":"assistant","model":"claude-opus-5-5","usage":{"input_tokens":1000,"server_tool_use":{"web_search_requests":4}}}}"#;
-        let sf = ScannedFile { path: "/x/p/sw.jsonl".into(), project: "p".into(), size: 1, mtime: 1, subagent: None };
+        let sf = ScannedFile { path: "/x/p/sw.jsonl".into(), project: "p".into(), size: 1, mtime: 1, subagent: None, account: String::new() };
         store.replace_file(&sf, &parse_str("p", content)).unwrap();
         store.rebuild_sessions().unwrap();
         let p = PriceTable::seed();

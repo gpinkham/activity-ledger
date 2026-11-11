@@ -6,8 +6,10 @@ interface Nav {
   screen: Screen;
   sessionId: string | null;
   sessionsProject: string | null;
+  /** The account of the Projects row clicked: one folder can be in two accounts. */
+  sessionsAccount: string | null;
   setScreen: (s: Screen) => void;
-  openSessionsForProject: (project: string) => void;
+  openSessionsForProject: (project: string, account?: string) => void;
   openSession: (id: string) => void;
   back: () => void;
 }
@@ -18,18 +20,25 @@ export function NavProvider({ children }: { children: ReactNode }) {
   const [screen, setScreenState] = useState<Screen>("overview");
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessionsProject, setSessionsProject] = useState<string | null>(null);
+  const [sessionsAccount, setSessionsAccount] = useState<string | null>(null);
 
   const value = useMemo<Nav>(
     () => ({
       screen,
       sessionId,
       sessionsProject,
-      setScreen: (s) => { setSessionId(null); setSessionsProject(null); setScreenState(s); },
-      openSessionsForProject: (project) => { setSessionId(null); setSessionsProject(project); setScreenState("sessions"); },
+      sessionsAccount,
+      setScreen: (s) => { setSessionId(null); setSessionsProject(null); setSessionsAccount(null); setScreenState(s); },
+      openSessionsForProject: (project, account) => {
+        setSessionId(null);
+        setSessionsProject(project);
+        setSessionsAccount(account ?? null);
+        setScreenState("sessions");
+      },
       openSession: (id) => setSessionId(id),
       back: () => setSessionId(null),
     }),
-    [screen, sessionId, sessionsProject],
+    [screen, sessionId, sessionsProject, sessionsAccount],
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

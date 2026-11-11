@@ -11,6 +11,7 @@ use crate::metrics::{bind, where_clause, Filters, Totals};
 use crate::pricing::PriceTable;
 use crate::store::Store;
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc, Weekday};
+use std::collections::BTreeMap;
 use std::fmt::Write;
 
 pub const CLOSING_LINE: &str =
@@ -36,11 +37,34 @@ pub fn monday_of(d: NaiveDate) -> NaiveDate {
 
 /// The instants a local week covers: from its Monday's local midnight to the next
 /// Monday's.
-fn week_filters(clock: &dyn Clock, monday: NaiveDate) -> Filters {
+fn week_filters(clock: &dyn Clock, monday: NaiveDate, scope: &Scope) -> Filters {
     Filters {
         from_ts: Some(iso(clock.start_of(monday))),
         to_ts: Some(iso(clock.start_of(monday + Duration::days(7)))),
+        account: scope.account.clone(),
+        exclude_accounts: scope.exclude.clone(),
         ..Default::default()
+    }
+}
+
+/// Which accounts a report covers, and what each is called.
+#[derive(Debug, Clone, Default)]
+pub struct Scope {
+    /// One account's calls only; none is every account.
+    pub account: Option<String>,
+    /// Account id -> its name. With hiding on, accounts are numbered instead.
+    pub labels: BTreeMap<String, String>,
+    /// Accounts hidden in settings, left out of an every-account report.
+    pub exclude: Vec<String>,
+}
+
+impl Scope {
+    fn name(&self, account: &str, hide: bool) -> String {
+        if hide {
+            let n = self.labels.keys().position(|k| k == account).map_or(0, |i| i + 1);
+            return format!("Account {n}");
+        }
+        cell(self.labels.get(account).map_or(account, |l| l.as_str()))
     }
 }
 
@@ -141,21 +165,28 @@ pub fn build_report(
     clock: &dyn Clock,
     monday: NaiveDate,
     hide_projects: bool,
+    scope: &Scope,
     written: &str,
 ) -> rusqlite::Result<String> {
     let sunday = monday + Duration::days(6);
-    let this = week_filters(clock, monday);
+    let this = week_filters(clock, monday, scope);
     let now = week(store, price, &this)?;
-    let before = week(store, price, &week_filters(clock, monday - Duration::days(7)))?;
+    let before = week(store, price, &week_filters(clock, monday - Duration::days(7), scope))?;
 
     // Projects by cost, each lettered by that rank, for hiding.
     let projects = store.by_project(price, &this)?;
-    let name = |project: &str| -> String {
-        if hide_projects {
+    let name = |project: &str, account: &str| -> String {
+        let base = if hide_projects {
             let rank = projects.iter().position(|p| p.project == project).unwrap_or(projects.len());
             format!("Project {}", letter(rank))
         } else {
             cell(project)
+        };
+        // One folder used from two accounts is two rows: say whose each is.
+        if projects.iter().filter(|p| p.project == project).count() > 1 {
+            format!("{base} ({})", scope.name(account, hide_projects))
+        } else {
+            base
         }
     };
 
@@ -169,6 +200,17 @@ pub fn build_report(
         long_date(monday),
         long_date(sunday)
     );
+    // Which account, once there is more than one to tell apart.
+    match &scope.account {
+        Some(a) => {
+            let _ = writeln!(md, "\nAccount: {}.", scope.name(a, hide_projects));
+        }
+        None if scope.labels.len() > 1 => {
+            let names: Vec<String> = scope.labels.keys().map(|k| scope.name(k, hide_projects)).collect();
+            let _ = writeln!(md, "\nAll accounts: {}.", names.join(", "));
+        }
+        None => {}
+    }
 
     // 1. Totals.
     let (t, b) = (&now.totals, &before.totals);
@@ -192,7 +234,7 @@ pub fn build_report(
     // 2. By day: all seven, empty days as 0.
     let days = store.by_day_with(
         price,
-        &Filters { from: Some(monday.to_string()), to: Some(sunday.to_string()), ..Default::default() },
+        &Filters { from: Some(monday.to_string()), to: Some(sunday.to_string()), account: scope.account.clone(), exclude_accounts: scope.exclude.clone(), ..Default::default() },
         clock,
     )?;
     let _ = writeln!(md, "\n## By day\n");
@@ -229,7 +271,7 @@ pub fn build_report(
         let _ = writeln!(md, "| Project | Cost | Sessions | Share |");
         let _ = writeln!(md, "|---|---:|---:|---:|");
         for p in projects.iter().take(TOP_PROJECTS) {
-            let _ = writeln!(md, "| {} | {} | {} | {} |", name(&p.project), usd(p.cost_usd), count(p.sessions), share(p.cost_usd, t.est_cost_usd));
+            let _ = writeln!(md, "| {} | {} | {} | {} |", name(&p.project, &p.account), usd(p.cost_usd), count(p.sessions), share(p.cost_usd, t.est_cost_usd));
         }
         let rest = &projects[projects.len().min(TOP_PROJECTS)..];
         if !rest.is_empty() {
@@ -255,7 +297,7 @@ pub fn build_report(
                 .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
                 .map(|t| short_date(clock.date_of(t.with_timezone(&Utc))))
                 .unwrap_or_default();
-            let _ = writeln!(md, "| {date} | {} | {} | {} |", name(&s.project), duration(s.duration_secs), usd(s.cost_usd));
+            let _ = writeln!(md, "| {date} | {} | {} | {} |", name(&s.project, &s.account), duration(s.duration_secs), usd(s.cost_usd));
         }
     }
 
@@ -382,7 +424,7 @@ mod tests {
 
     fn report(fx: &Fixture, hide: bool) -> String {
         let monday = day(MONDAY.0, MONDAY.1, MONDAY.2);
-        build_report(&fx.store, &PriceTable::seed(), &West(day(2026, 11, 3)), monday, hide, "3 Nov 2026 at 09:15").unwrap()
+        build_report(&fx.store, &PriceTable::seed(), &West(day(2026, 11, 3)), monday, hide, &Scope::default(), "3 Nov 2026 at 09:15").unwrap()
     }
 
     #[test]
@@ -419,7 +461,7 @@ mod tests {
         let table = PriceTable::seed();
         let monday = day(MONDAY.0, MONDAY.1, MONDAY.2);
         let clock = West(day(2026, 11, 3));
-        let f = week_filters(&clock, monday);
+        let f = week_filters(&clock, monday, &Scope::default());
         let report_total = fx.store.totals(&table, &f).unwrap().est_cost_usd;
         // get_totals for the same seven local dates, asked by date.
         let by_days: f64 = fx
@@ -472,7 +514,7 @@ mod tests {
             .collect();
         assert_eq!(rows.len(), 11, "{rows:?}");
         assert!(rows[10].starts_with("| Other (2 projects) |"), "{}", rows[10]);
-        let ranked = fx.store.by_project(&PriceTable::seed(), &week_filters(&West(day(2026, 11, 3)), day(MONDAY.0, MONDAY.1, MONDAY.2))).unwrap();
+        let ranked = fx.store.by_project(&PriceTable::seed(), &week_filters(&West(day(2026, 11, 3)), day(MONDAY.0, MONDAY.1, MONDAY.2), &Scope::default())).unwrap();
         assert_eq!(ranked.len(), 12);
         for p in &ranked[10..] {
             assert!(!md.contains(p.project.as_str()), "{} is folded into Other", p.project);
@@ -518,7 +560,7 @@ mod tests {
     #[test]
     fn the_closing_line_is_always_there_even_for_an_empty_week() {
         let store = Store::open_in_memory();
-        let md = build_report(&store, &PriceTable::seed(), &West(day(2026, 11, 3)), day(2026, 10, 26), false, "now").unwrap();
+        let md = build_report(&store, &PriceTable::seed(), &West(day(2026, 11, 3)), day(2026, 10, 26), false, &Scope::default(), "now").unwrap();
         assert!(md.trim_end().ends_with(CLOSING_LINE), "{md}");
         assert!(md.contains("| Mon 26 Oct | $0.00 | 0 |"));
         assert!(md.contains("| Sun 1 Nov | $0.00 | 0 |"));
@@ -531,9 +573,9 @@ mod tests {
     #[test]
     fn this_week_so_far_is_said_when_today_is_in_the_week() {
         let store = Store::open_in_memory();
-        let md = build_report(&store, &PriceTable::seed(), &West(day(2026, 10, 28)), day(2026, 10, 26), false, "now").unwrap();
+        let md = build_report(&store, &PriceTable::seed(), &West(day(2026, 10, 28)), day(2026, 10, 26), false, &Scope::default(), "now").unwrap();
         assert!(md.contains("This week so far."));
-        let md = build_report(&store, &PriceTable::seed(), &West(day(2026, 11, 3)), day(2026, 10, 26), false, "now").unwrap();
+        let md = build_report(&store, &PriceTable::seed(), &West(day(2026, 11, 3)), day(2026, 10, 26), false, &Scope::default(), "now").unwrap();
         assert!(!md.contains("so far"));
     }
 

@@ -9,6 +9,12 @@ pub struct Filters {
     pub from: Option<String>,
     pub to: Option<String>,
     pub project: Option<String>,
+    /// One Claude account's calls only (accounts.rs); none is every account.
+    pub account: Option<String>,
+    /// Accounts left out when `account` is none: those hidden in settings. Set by
+    /// the app, not sent by the window.
+    #[serde(default, skip_serializing)]
+    pub exclude_accounts: Vec<String>,
     /// A window of exact instants, `from_ts <= ts < to_ts`, as ISO-8601 UTC strings.
     /// `from` and `to` are UTC calendar days; these let a caller ask for a local day
     /// (the menu bar gauge's "today"), which can span two UTC dates.
@@ -38,9 +44,20 @@ pub struct ByTool { pub tool: String, pub count: i64, pub is_mcp: bool }
 #[derive(Debug, Serialize)]
 pub struct ByDay { pub day: String, pub messages: i64, pub cost_usd: f64 }
 
+/// One account's share of the cost (the Overview's "By account").
+#[derive(Debug, Serialize, PartialEq)]
+pub struct ByAccount {
+    pub account: String,
+    pub sessions: i64,
+    pub cost_usd: f64,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ByProject {
     pub project: String,
+    /// The account the project's calls were made in. One project folder used
+    /// from two accounts is two rows.
+    pub account: String,
     pub sessions: i64,
     pub tokens: i64,
     pub cost_usd: f64,
@@ -77,6 +94,14 @@ pub(crate) fn where_clause(f: &Filters) -> (String, Vec<(String, String)>) {
     if let Some(p) = &f.project {
         clauses.push("project = :project".to_string());
         binds.push((":project".into(), p.clone()));
+    }
+    if let Some(a) = &f.account {
+        clauses.push("account = :account".to_string());
+        binds.push((":account".into(), a.clone()));
+    } else if !f.exclude_accounts.is_empty() {
+        let names: Vec<String> = (0..f.exclude_accounts.len()).map(|i| format!(":xa{i}")).collect();
+        clauses.push(format!("account NOT IN ({})", names.join(", ")));
+        binds.extend(names.into_iter().zip(f.exclude_accounts.iter().cloned()));
     }
     if let Some(from) = &f.from {
         clauses.push("substr(ts,1,10) >= :from".to_string());
@@ -162,6 +187,47 @@ impl Store {
         let cacheable = (t.cache_read + t.cache_creation) as f64;
         t.cache_hit_ratio = if cacheable > 0.0 { t.cache_read as f64 / cacheable } else { 0.0 };
         Ok(t)
+    }
+
+    /// Each account's cost and sessions over `f`, in one pass: the same figures as
+    /// `totals` with `f.account` set to each account in turn.
+    pub fn by_account(&self, price: &PriceTable, f: &Filters) -> rusqlite::Result<Vec<ByAccount>> {
+        self.by_account_with(price, f, &SystemClock)
+    }
+
+    pub fn by_account_with(&self, price: &PriceTable, f: &Filters, clock: &dyn Clock) -> rusqlite::Result<Vec<ByAccount>> {
+        let (w, binds) = where_clause(&local_days(f, clock));
+        let m = price.model_sql();
+        let sql = format!(
+            "SELECT account, {m}, SUM(input_tokens), SUM(output_tokens), SUM(cache_read),
+                    SUM(ephemeral_1h), SUM(ephemeral_5m), SUM(web_searches)
+             FROM messages {w} GROUP BY account, {m}"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(bind(&binds).as_slice(), |r| {
+            Ok((
+                r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                r.get::<_, i64>(2)?, r.get::<_, i64>(3)?, r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?, r.get::<_, i64>(6)?, r.get::<_, i64>(7)?,
+            ))
+        })?;
+        let mut acc: std::collections::BTreeMap<String, ByAccount> = std::collections::BTreeMap::new();
+        for row in rows {
+            let (account, model, input, output, cr, e1h, e5m, web) = row?;
+            let tb = TokenBreakdown { input, output, cache_creation_5m: e5m, cache_creation_1h: e1h, cache_read: cr, web_searches: web };
+            let e = acc.entry(account.clone()).or_insert(ByAccount { account, sessions: 0, cost_usd: 0.0 });
+            e.cost_usd += price.cost(&model, &tb);
+        }
+        let ssql = format!("SELECT account, COUNT(DISTINCT session_id) FROM messages {w} GROUP BY account");
+        let mut sstmt = self.conn.prepare(&ssql)?;
+        let srows = sstmt.query_map(bind(&binds).as_slice(), |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        for row in srows {
+            let (account, n) = row?;
+            if let Some(e) = acc.get_mut(&account) {
+                e.sessions = n;
+            }
+        }
+        Ok(acc.into_values().collect())
     }
 
     pub fn by_model(&self, price: &PriceTable, f: &Filters) -> rusqlite::Result<Vec<ByModel>> {
@@ -279,26 +345,26 @@ impl Store {
         f2.project = None;
         let (w, binds) = where_clause(&f2);
         let msql = format!(
-            "SELECT project, {m}, SUM(input_tokens), SUM(output_tokens),
+            "SELECT project, account, {m}, SUM(input_tokens), SUM(output_tokens),
                     SUM(cache_read), SUM(ephemeral_1h), SUM(ephemeral_5m), SUM(web_searches)
-             FROM messages {w} GROUP BY project, {m}",
+             FROM messages {w} GROUP BY project, account, {m}",
             m = price.model_sql()
         );
         let mut stmt = self.conn.prepare(&msql)?;
         let rows = stmt.query_map(bind(&binds).as_slice(), |r| {
             Ok((
-                r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                r.get::<_, i64>(2)?, r.get::<_, i64>(3)?, r.get::<_, i64>(4)?,
-                r.get::<_, i64>(5)?, r.get::<_, i64>(6)?, r.get::<_, i64>(7)?,
+                r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                r.get::<_, i64>(3)?, r.get::<_, i64>(4)?, r.get::<_, i64>(5)?,
+                r.get::<_, i64>(6)?, r.get::<_, i64>(7)?, r.get::<_, i64>(8)?,
             ))
         })?;
         use std::collections::BTreeMap;
-        let mut acc: BTreeMap<String, ByProject> = BTreeMap::new();
+        let mut acc: BTreeMap<(String, String), ByProject> = BTreeMap::new();
         for row in rows {
-            let (project, model, input, output, cr, e1h, e5m, web) = row?;
+            let (project, account, model, input, output, cr, e1h, e5m, web) = row?;
             let tb = TokenBreakdown { input, output, cache_creation_5m: e5m, cache_creation_1h: e1h, cache_read: cr, web_searches: web };
-            let e = acc.entry(project.clone()).or_insert(ByProject {
-                project, sessions: 0, tokens: 0, cost_usd: 0.0, tool_calls: 0, edit_write: 0, web: 0,
+            let e = acc.entry((project.clone(), account.clone())).or_insert(ByProject {
+                project, account, sessions: 0, tokens: 0, cost_usd: 0.0, tool_calls: 0, edit_write: 0, web: 0,
             });
             e.tokens += input + output;
             e.cost_usd += price.cost(&model, &tb);
@@ -306,32 +372,32 @@ impl Store {
         // True per-project distinct session count (a project's sessions can span
         // multiple models, so this must not be derived from the per-model groups above).
         let ssql = format!(
-            "SELECT project, COUNT(DISTINCT session_id) FROM messages {w} GROUP BY project"
+            "SELECT project, account, COUNT(DISTINCT session_id) FROM messages {w} GROUP BY project, account"
         );
         let mut sstmt = self.conn.prepare(&ssql)?;
         let srows = sstmt.query_map(bind(&binds).as_slice(), |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
         })?;
         for row in srows {
-            let (project, sess) = row?;
-            if let Some(e) = acc.get_mut(&project) {
+            let (project, account, sess) = row?;
+            if let Some(e) = acc.get_mut(&(project, account)) {
                 e.sessions = sess;
             }
         }
         // Tool counts per project.
         let tsql = format!(
-            "SELECT project, COUNT(*),
+            "SELECT project, account, COUNT(*),
                     SUM(CASE WHEN name IN ('Edit','Write') THEN 1 ELSE 0 END),
                     SUM(CASE WHEN name IN ('WebSearch','WebFetch') THEN 1 ELSE 0 END)
-             FROM tool_calls {w} GROUP BY project"
+             FROM tool_calls {w} GROUP BY project, account"
         );
         let mut tstmt = self.conn.prepare(&tsql)?;
         let trows = tstmt.query_map(bind(&binds).as_slice(), |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?))
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?, r.get::<_, i64>(4)?))
         })?;
         for row in trows {
-            let (project, total, ew, web) = row?;
-            if let Some(e) = acc.get_mut(&project) {
+            let (project, account, total, ew, web) = row?;
+            if let Some(e) = acc.get_mut(&(project, account)) {
                 e.tool_calls = total;
                 e.edit_write = ew;
                 e.web = web;
@@ -406,7 +472,7 @@ mod tests {
     fn seeded() -> Store {
         let mut store = Store::open_in_memory();
         let parsed = parse_str("proj-a", include_str!("../tests/fixtures/sample.jsonl"));
-        let sf = ScannedFile { path: "/x/proj-a/s1.jsonl".into(), project: "proj-a".into(), size: 1, mtime: 1, subagent: None };
+        let sf = ScannedFile { path: "/x/proj-a/s1.jsonl".into(), project: "proj-a".into(), size: 1, mtime: 1, subagent: None, account: String::new() };
         store.replace_file(&sf, &parsed).unwrap();
         store.rebuild_sessions().unwrap();
         store
@@ -434,7 +500,7 @@ mod tests {
         // 03:30 UTC on Oct 2 is the evening of Oct 1 four hours west; 23:30 UTC on Oct 2
         // is still Oct 2 there.
         let content = line("a", "2026-10-02T03:30:00.000Z") + &line("b", "2026-10-02T23:30:00.000Z") + &line("c", "2026-10-03T12:00:00.000Z");
-        let sf = ScannedFile { path: "/x/p/s1.jsonl".into(), project: "p".into(), size: 1, mtime: 1, subagent: None };
+        let sf = ScannedFile { path: "/x/p/s1.jsonl".into(), project: "p".into(), size: 1, mtime: 1, subagent: None, account: String::new() };
         store.replace_file(&sf, &parse_str("p", &content)).unwrap();
         let p = PriceTable::seed();
         let days = |f: &Filters| -> Vec<(String, i64)> {
@@ -503,12 +569,12 @@ mod tests {
     fn by_project_counts_sessions_across_models() {
         let mut store = Store::open_in_memory();
         let parsed1 = parse_str("proj-a", include_str!("../tests/fixtures/sample.jsonl"));
-        let sf1 = ScannedFile { path: "/x/proj-a/s1.jsonl".into(), project: "proj-a".into(), size: 1, mtime: 1, subagent: None };
+        let sf1 = ScannedFile { path: "/x/proj-a/s1.jsonl".into(), project: "proj-a".into(), size: 1, mtime: 1, subagent: None, account: String::new() };
         store.replace_file(&sf1, &parsed1).unwrap();
 
         let s2 = r#"{"type":"assistant","sessionId":"s2","timestamp":"2026-07-25T09:00:00.000Z","gitBranch":"main","version":"2.1.214","message":{"role":"assistant","model":"claude-haiku-4-5","stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"content":[{"type":"text","text":"hi again"}]}}"#;
         let parsed2 = parse_str("proj-a", s2);
-        let sf2 = ScannedFile { path: "/x/proj-a/s2.jsonl".into(), project: "proj-a".into(), size: 1, mtime: 1, subagent: None };
+        let sf2 = ScannedFile { path: "/x/proj-a/s2.jsonl".into(), project: "proj-a".into(), size: 1, mtime: 1, subagent: None, account: String::new() };
         store.replace_file(&sf2, &parsed2).unwrap();
 
         store.rebuild_sessions().unwrap();
@@ -529,7 +595,7 @@ mod tests {
             ("p", line("a", "s1", "2026-10-02T03:30:00.000Z", 0, bash) + &line("b", "s1", "2026-10-02T23:30:00.000Z", 2, "")),
             ("q", line("c", "s2", "2026-10-03T12:00:00.000Z", 0, "")),
         ] {
-            let sf = ScannedFile { path: format!("/x/{project}/s.jsonl").into(), project: project.into(), size: 1, mtime: 1, subagent: None };
+            let sf = ScannedFile { path: format!("/x/{project}/s.jsonl").into(), project: project.into(), size: 1, mtime: 1, subagent: None, account: String::new() };
             store.replace_file(&sf, &parse_str(project, &content)).unwrap();
         }
         store.rebuild_sessions().unwrap();

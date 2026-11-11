@@ -1,6 +1,7 @@
 import type { Group, LabelCoverage, LabelSource } from "./labelSource";
 
-export interface Filters { from?: string; to?: string; project?: string }
+/** `account`: one Claude account's activity only (an `Account` id); none is every account not hidden. */
+export interface Filters { from?: string; to?: string; project?: string; account?: string }
 
 export interface Totals {
   sessions: number; messages: number; input_tokens: number; output_tokens: number;
@@ -9,8 +10,11 @@ export interface Totals {
 export interface ByModel { model: string; messages: number; tokens: number; cost_usd: number }
 export interface ByTool { tool: string; count: number; is_mcp: boolean }
 export interface ByDay { day: string; messages: number; cost_usd: number }
+/** One account's share of the cost (the Overview's "By account"). */
+export interface ByAccount { account: string; sessions: number; cost_usd: number }
 export interface ByProject {
-  project: string; sessions: number; tokens: number; cost_usd: number;
+  /** One project folder used from two accounts is two rows. */
+  project: string; account: string; sessions: number; tokens: number; cost_usd: number;
   tool_calls: number; edit_write: number; web: number;
 }
 export interface HeatCell { weekday: number; hour: number; count: number }
@@ -32,7 +36,7 @@ export interface PriceTable {
 export interface RefreshSummary { files_scanned: number; files_parsed: number }
 
 export interface SessionSummary {
-  session_id: string; project: string; title: string | null;
+  session_id: string; project: string; account: string; title: string | null;
   started_at: string | null; ended_at: string | null; duration_secs: number;
   message_count: number; tokens: number; cost_usd: number; tool_calls: number; models: string[];
 }
@@ -78,8 +82,11 @@ export interface AppSettings {
   ollama_url: string; ollama_model: string;
   local_context_limit: number; local_output_limit: number;
   model_labels_enabled: boolean; allow_remote_ollama: boolean;
-  /** The menu bar gauge: monthly budget in USD (0 = not set), thresholds in percent. */
-  monthly_budget_usd: number; amber_pct: number; red_pct: number; show_in_menu_bar: boolean;
+  /** Show the gauge in the menu bar. Budgets are per account (`AccountSettings`). */
+  show_in_menu_bar: boolean;
+  /** Account settings, written only through their own commands (set_account_settings and the rest). */
+  accounts?: Record<string, AccountSettings>; extra_config_dirs?: string[];
+  dir_accounts?: Record<string, string>; tray_account?: string | null;
   /** The weekly report letters projects ("Project A") instead of naming them. */
   report_hide_projects: boolean;
 }
@@ -89,7 +96,24 @@ export interface BudgetView {
   daily_allowance: number; today: number; today_share: number; month_to_date: number;
   on_pace: number; projected: number; remaining_per_day: number; ring: Ring;
 }
-export interface GaugeView { day: string; budget: BudgetView; rate_source: "configured" | "list" }
+export interface GaugeView {
+  day: string; budget: BudgetView; rate_source: "configured" | "list";
+  /** The account the ring follows, and its name; none is every account (no budget, no ring). */
+  account?: string | null; account_label?: string | null;
+}
+/** What is set for one Claude account: its name and colour, and its own budget. */
+export interface AccountSettings {
+  label: string | null; colour: string | null; hidden: boolean;
+  monthly_budget_usd: number; amber_pct: number; red_pct: number;
+}
+/** A Claude Code config folder (~/.claude, ~/.claude-work...) and where it was found. */
+export interface DirInfo { path: string; origin: string; custom: boolean; own_account: string }
+/** One Claude account: the config folders signed in to it, merged. */
+export interface Account {
+  id: string; label: string; default_label: string; plan: string | null;
+  email: string | null; org_name: string | null; dirs: DirInfo[];
+  settings: AccountSettings; colour: string;
+}
 export interface WorkSplit { work_usd: number; overhead_usd: number }
 export interface LabelProgress {
   running: boolean; loading: boolean; total: number; done: number; labelled: number; failed: number; stopped: string | null;
