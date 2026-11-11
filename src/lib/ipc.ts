@@ -36,5 +36,6 @@ export const weeklyReport = (weekStart: string, hideProjects: boolean) =>
   invoke<string>("weekly_report", { weekStart, hideProjects });
 export const openWeeklyReport = () => invoke<void>("open_weekly_report");
 export const quitApp = () => invoke<void>("quit_app");
+export const fitPanel = (height: number) => invoke<void>("fit_panel", { height });
 export const setReportHideProjects = (hide: boolean) => invoke<AppSettings>("set_report_hide_projects", { hide });
 export const setAdapterEnabled = (name: string, enabled: boolean) => invoke<TriggerStatus>("set_adapter_enabled", { name, enabled });
