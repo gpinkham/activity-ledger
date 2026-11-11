@@ -172,7 +172,10 @@ fn refresh_store(state: &AppState) -> Result<RefreshSummary, String> {
     do_refresh_roots(&mut store, &roots, &config.matcher(state.home.as_deref())).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+/// Runs off the main thread (`async`): it looks for config folders again (on
+/// Windows that runs `wsl.exe` and reads each WSL home) and then reads every new
+/// transcript, which on the main thread held up every window call meanwhile.
+#[tauri::command(async)]
 pub fn refresh(state: tauri::State<AppState>) -> Result<RefreshSummary, String> {
     // A folder made since the last look (a new CLAUDE_CONFIG_DIR) is found here.
     rediscover(&state)?;
@@ -934,9 +937,10 @@ mod tests {
 
     #[test]
     fn the_account_settings_commands_run_off_the_main_thread() {
-        // The same text check: each re-reads folders or polls them for the tray icon.
+        // The same text check: each re-reads folders or polls them for the tray icon,
+        // and refresh looks for config folders again, in WSL too.
         let src = include_str!("commands.rs");
-        for cmd in ["set_account_settings", "set_dir_account", "add_config_dir", "remove_config_dir", "set_tray_account"] {
+        for cmd in ["refresh", "set_account_settings", "set_dir_account", "add_config_dir", "remove_config_dir", "set_tray_account"] {
             assert!(src.contains(&format!("#[tauri::command(async)]\npub fn {cmd}(")), "{cmd} must be #[tauri::command(async)]");
         }
     }
