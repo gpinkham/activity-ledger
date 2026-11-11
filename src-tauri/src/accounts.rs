@@ -215,17 +215,16 @@ impl Discovery {
     /// The accounts, in the order their first folder was found, with their settings.
     pub fn accounts(&self, settings: &AppSettings) -> Vec<Account> {
         let mut out: Vec<Account> = Vec::new();
+        let mut members: Vec<Vec<&ConfigDir>> = Vec::new();
         for d in &self.dirs {
             let id = self.account_of(d);
             let info = DirInfo { path: d.key(), origin: d.origin.clone(), custom: d.custom, own_account: d.own_account() };
-            if let Some(a) = out.iter_mut().find(|a| a.id == id) {
-                a.dirs.push(info);
-                if a.email.is_none() && a.org_name.is_none() {
-                    fill_identity(a, d);
-                }
+            if let Some(i) = out.iter().position(|a| a.id == id) {
+                out[i].dirs.push(info);
+                members[i].push(d);
                 continue;
             }
-            let mut a = Account {
+            out.push(Account {
                 id: id.clone(),
                 label: String::new(),
                 default_label: String::new(),
@@ -235,22 +234,32 @@ impl Discovery {
                 dirs: vec![info],
                 settings: settings.accounts.get(&id).cloned().unwrap_or_default(),
                 colour: String::new(),
-            };
-            fill_identity(&mut a, d);
-            out.push(a);
+            });
+            members.push(vec![d]);
         }
         for (i, a) in out.iter_mut().enumerate() {
+            // The login comes from a folder signed in to this account, not from one
+            // moved into it; with none, from its first folder.
+            let own = members[i].iter().find(|d| d.own_account() == a.id).unwrap_or(&members[i][0]);
+            fill_identity(a, own);
             a.label = a.settings.label.clone().filter(|l| !l.trim().is_empty()).unwrap_or_else(|| a.default_label.clone());
             a.colour = a.settings.colour.clone().filter(|c| !c.is_empty()).unwrap_or_else(|| PALETTE[i % PALETTE.len()].into());
         }
-        // Two accounts with the same name would read as one: say where each lives.
-        let labels: Vec<String> = out.iter().map(|a| a.label.clone()).collect();
+        // Two accounts with the same name would read as one: say where each lives,
+        // by where its first folder was found, and the folder's name if that is shared too.
+        let named: Vec<(String, String)> = out.iter().map(|a| (a.label.clone(), a.dirs[0].origin.clone())).collect();
         for a in out.iter_mut() {
-            if a.settings.label.is_none() && labels.iter().filter(|l| **l == a.label).count() > 1 {
-                if let Some(d) = a.dirs.first() {
-                    a.label = format!("{} ({})", a.label, dir_label(Path::new(&d.path)));
-                }
+            let same_name = named.iter().filter(|(l, _)| *l == a.label).count();
+            if a.settings.label.is_some() || same_name < 2 {
+                continue;
             }
+            let d = &a.dirs[0];
+            let same_place = named.iter().filter(|(l, o)| *l == a.label && *o == d.origin).count();
+            a.label = if same_place > 1 {
+                format!("{} ({}, {})", a.label, d.origin, dir_label(Path::new(&d.path)))
+            } else {
+                format!("{} ({})", a.label, d.origin)
+            };
         }
         out
     }
@@ -417,8 +426,8 @@ mod tests {
         split.dir_accounts.insert(wsl_dir.clone(), format!("dir:{wsl_dir}"));
         let accounts = Discovery::new(discover_in(&homes, &[]), &split).accounts(&split);
         assert_eq!(accounts.len(), 3);
-        assert_eq!(accounts[0].label, "Personal (claude)", "two of one name say which folder");
-        assert_eq!(accounts[1].label, "Personal (claude)");
+        assert_eq!(accounts[0].label, "Personal (Windows)", "two of one name say where each lives");
+        assert_eq!(accounts[1].label, "Personal (WSL · Ubuntu)");
 
         // Moved into another account: its transcripts count there.
         let mut merged = AppSettings::default();
@@ -427,6 +436,16 @@ mod tests {
         let found = Discovery::new(discover_in(&homes, &[]), &merged);
         assert_eq!(found.roots()[1].account, work);
         assert_eq!(found.accounts(&merged).len(), 2);
+
+        // The folder found first moved into the work account: the work account keeps
+        // its own name, plan and email, not those of the folder moved in.
+        let mut first_moved = AppSettings::default();
+        first_moved.dir_accounts.insert(win.join(".claude").to_string_lossy().to_string(), work.clone());
+        let accounts = Discovery::new(discover_in(&homes, &[]), &first_moved).accounts(&first_moved);
+        let acme = accounts.iter().find(|a| a.id == work).unwrap();
+        assert_eq!(acme.label, "Acme");
+        assert_eq!(acme.plan.as_deref(), Some("Enterprise"));
+        assert_eq!(acme.dirs.len(), 2);
         fs::remove_dir_all(&win).ok();
         fs::remove_dir_all(&wsl).ok();
     }

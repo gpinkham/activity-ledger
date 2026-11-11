@@ -314,6 +314,29 @@ impl Store {
         Ok(true)
     }
 
+    /// Drop every row read from a file under `dir` (a config folder no longer read).
+    /// Files that only vanished are kept: Claude Code deletes old transcripts, and
+    /// the cache keeps their history. Returns how many files were dropped.
+    pub fn forget_under(&mut self, dir: &str) -> rusqlite::Result<usize> {
+        let dir = dir.trim_end_matches(['/', '\\']);
+        let tx = self.conn.transaction()?;
+        let paths: Vec<String> = {
+            let mut st = tx.prepare("SELECT path FROM files")?;
+            let all = st.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            all.into_iter()
+                .filter(|p| p.strip_prefix(dir).is_some_and(|rest| rest.starts_with(['/', '\\'])))
+                .collect()
+        };
+        for p in &paths {
+            for table in ["messages", "tool_calls", "prompts", "subagents", "cost_states"] {
+                tx.execute(&format!("DELETE FROM {table} WHERE file = ?1"), params![p])?;
+            }
+            tx.execute("DELETE FROM files WHERE path = ?1", params![p])?;
+        }
+        tx.commit()?;
+        Ok(paths.len())
+    }
+
     /// The same record can sit in several files (a session file present under two
     /// project folders; history copied into a resumed session). Keep one copy live
     /// and mark the rest `dup = 1`; every query reads `dup = 0`. The copy kept is in

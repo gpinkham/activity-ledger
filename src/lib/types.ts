@@ -10,6 +10,8 @@ export interface Totals {
 export interface ByModel { model: string; messages: number; tokens: number; cost_usd: number }
 export interface ByTool { tool: string; count: number; is_mcp: boolean }
 export interface ByDay { day: string; messages: number; cost_usd: number }
+/** One account's share of the cost (the Overview's "By account"). */
+export interface ByAccount { account: string; sessions: number; cost_usd: number }
 export interface ByProject {
   /** One project folder used from two accounts is two rows. */
   project: string; account: string; sessions: number; tokens: number; cost_usd: number;

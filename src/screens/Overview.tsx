@@ -1,8 +1,8 @@
-import { useQueries, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { AccountDot, useAccounts } from "../components/Accounts";
 import { accountDetail, showAccountChips, visibleAccounts } from "../lib/accounts";
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
-import { getTotals, getByDay } from "../lib/ipc";
+import { getTotals, getByDay, getByAccount } from "../lib/ipc";
 import { useFilters } from "../state/filters";
 import { KpiRow } from "../components/KpiRow";
 import { ChartCard } from "../components/ChartCard";
@@ -16,14 +16,17 @@ function ByAccount() {
   const accounts = useAccounts();
   const visible = visibleAccounts(accounts.data);
   const show = showAccountChips(accounts.data, filters.account);
-  const totals = useQueries({
-    queries: (show ? visible : []).map((a) => ({
-      queryKey: ["totals", { ...filters, account: a.id }],
-      queryFn: () => getTotals({ ...filters, account: a.id }),
-    })),
+  const split = useQuery({
+    queryKey: ["byAccount", filters],
+    queryFn: () => getByAccount(filters),
+    enabled: show,
   });
   if (!show) return null;
-  const costs = visible.map((a, i) => ({ a, t: totals[i]?.data }));
+  // An account with nothing in the range is still listed, at $0.
+  const costs = visible.map((a) => {
+    const row = split.data?.find((r) => r.account === a.id);
+    return { a, t: split.data ? { est_cost_usd: row?.cost_usd ?? 0, sessions: row?.sessions ?? 0 } : undefined };
+  });
   const all = costs.reduce((s, c) => s + (c.t?.est_cost_usd ?? 0), 0);
   return (
     <ChartCard title="By account" subtitle="Each Claude account on this machine, apart. Click one to see only its activity.">

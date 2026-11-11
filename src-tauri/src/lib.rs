@@ -86,6 +86,7 @@ pub fn run() {
             commands::get_by_tool,
             commands::get_by_day,
             commands::get_by_project,
+            commands::get_by_account,
             commands::get_workflow,
             commands::get_sessions,
             commands::get_session_detail,

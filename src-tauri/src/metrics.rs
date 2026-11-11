@@ -44,6 +44,14 @@ pub struct ByTool { pub tool: String, pub count: i64, pub is_mcp: bool }
 #[derive(Debug, Serialize)]
 pub struct ByDay { pub day: String, pub messages: i64, pub cost_usd: f64 }
 
+/// One account's share of the cost (the Overview's "By account").
+#[derive(Debug, Serialize, PartialEq)]
+pub struct ByAccount {
+    pub account: String,
+    pub sessions: i64,
+    pub cost_usd: f64,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ByProject {
     pub project: String,
@@ -179,6 +187,47 @@ impl Store {
         let cacheable = (t.cache_read + t.cache_creation) as f64;
         t.cache_hit_ratio = if cacheable > 0.0 { t.cache_read as f64 / cacheable } else { 0.0 };
         Ok(t)
+    }
+
+    /// Each account's cost and sessions over `f`, in one pass: the same figures as
+    /// `totals` with `f.account` set to each account in turn.
+    pub fn by_account(&self, price: &PriceTable, f: &Filters) -> rusqlite::Result<Vec<ByAccount>> {
+        self.by_account_with(price, f, &SystemClock)
+    }
+
+    pub fn by_account_with(&self, price: &PriceTable, f: &Filters, clock: &dyn Clock) -> rusqlite::Result<Vec<ByAccount>> {
+        let (w, binds) = where_clause(&local_days(f, clock));
+        let m = price.model_sql();
+        let sql = format!(
+            "SELECT account, {m}, SUM(input_tokens), SUM(output_tokens), SUM(cache_read),
+                    SUM(ephemeral_1h), SUM(ephemeral_5m), SUM(web_searches)
+             FROM messages {w} GROUP BY account, {m}"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(bind(&binds).as_slice(), |r| {
+            Ok((
+                r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                r.get::<_, i64>(2)?, r.get::<_, i64>(3)?, r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?, r.get::<_, i64>(6)?, r.get::<_, i64>(7)?,
+            ))
+        })?;
+        let mut acc: std::collections::BTreeMap<String, ByAccount> = std::collections::BTreeMap::new();
+        for row in rows {
+            let (account, model, input, output, cr, e1h, e5m, web) = row?;
+            let tb = TokenBreakdown { input, output, cache_creation_5m: e5m, cache_creation_1h: e1h, cache_read: cr, web_searches: web };
+            let e = acc.entry(account.clone()).or_insert(ByAccount { account, sessions: 0, cost_usd: 0.0 });
+            e.cost_usd += price.cost(&model, &tb);
+        }
+        let ssql = format!("SELECT account, COUNT(DISTINCT session_id) FROM messages {w} GROUP BY account");
+        let mut sstmt = self.conn.prepare(&ssql)?;
+        let srows = sstmt.query_map(bind(&binds).as_slice(), |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        for row in srows {
+            let (account, n) = row?;
+            if let Some(e) = acc.get_mut(&account) {
+                e.sessions = n;
+            }
+        }
+        Ok(acc.into_values().collect())
     }
 
     pub fn by_model(&self, price: &PriceTable, f: &Filters) -> rusqlite::Result<Vec<ByModel>> {

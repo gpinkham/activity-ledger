@@ -157,7 +157,7 @@ npm run test:ui
 npx tsc --noEmit
 ```
 
-196 Rust tests and 42 front-end tests; on Windows the 4 tests of the macOS signing script are skipped. The weekly report's expected output is checked in at `src-tauri/tests/fixtures/weekly-report.golden.md`; after a deliberate change, rewrite it with `UPDATE_GOLDEN=1 cargo test report::` and read the diff.
+198 Rust tests and 42 front-end tests; on Windows the 4 tests of the macOS signing script are skipped. The weekly report's expected output is checked in at `src-tauri/tests/fixtures/weekly-report.golden.md`; after a deliberate change, rewrite it with `UPDATE_GOLDEN=1 cargo test report::` and read the diff.
 
 ## License
 

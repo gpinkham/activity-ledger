@@ -4,7 +4,7 @@ use crate::budget::{self, BudgetView, Thresholds};
 use crate::gauge::{iso, Clock, SystemClock, Tally};
 use crate::exporter::build_bundle;
 use crate::labeller::{self, LabelProgress};
-use crate::metrics::{ByDay, ByModel, ByProject, ByTool, Filters, Totals, Workflow};
+use crate::metrics::{ByAccount, ByDay, ByModel, ByProject, ByTool, Filters, Totals, Workflow};
 use crate::parser::parse_with;
 use crate::pricing::{GaugePrices, ManagedPricing, PriceTable, RateSource};
 use crate::scanner::{scan_roots, unassigned};
@@ -195,6 +195,7 @@ metric_cmd!(get_totals, Totals, totals);
 metric_cmd!(get_by_model, Vec<ByModel>, by_model);
 metric_cmd!(get_by_day, Vec<ByDay>, by_day);
 metric_cmd!(get_by_project, Vec<ByProject>, by_project);
+metric_cmd!(get_by_account, Vec<ByAccount>, by_account);
 
 #[tauri::command]
 pub fn get_by_tool(state: tauri::State<AppState>, filters: Filters) -> Result<Vec<ByTool>, String> {
@@ -299,10 +300,27 @@ pub fn add_config_dir(app: tauri::AppHandle, state: tauri::State<AppState>, path
 
 #[tauri::command]
 pub fn remove_config_dir(app: tauri::AppHandle, state: tauri::State<AppState>, path: String) -> Result<Vec<Account>, String> {
-    edit_settings(&app, &state, Folders::Rescan, |s| {
+    let removed = path.clone();
+    let accounts = edit_settings(&app, &state, Folders::Rescan, |s| {
         s.extra_config_dirs.retain(|p| *p != path);
         s.dir_accounts.remove(&path);
-    })
+    })?;
+    forget_unread_dir(&state, &removed)?;
+    Ok(accounts)
+}
+
+/// Drop the cached rows of a config folder that is no longer read, so its
+/// transcripts stop counting. Kept when the folder is still found on its own.
+pub fn forget_unread_dir(state: &AppState, dir: &str) -> Result<(), String> {
+    let still_read = state.discovery.lock().map_err(|e| e.to_string())?.dirs.iter().any(|d| d.key() == dir);
+    if still_read {
+        return Ok(());
+    }
+    let mut store = state.store.lock().map_err(|e| e.to_string())?;
+    if store.forget_under(dir).map_err(|e| e.to_string())? > 0 {
+        store.rebuild_sessions().map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// The account the menu bar ring follows; none is every account.
@@ -449,8 +467,17 @@ pub struct GaugeView {
 /// Read what the transcripts gained (when `poll`), then price today and the month,
 /// for the account the ring follows (settings' `tray_account`).
 pub fn gauge_view(state: &AppState, clock: &dyn Clock, poll: bool) -> Result<GaugeView, String> {
-    let account = state.settings.lock().map_err(|e| e.to_string())?.tray_account.clone();
+    let account = tray_account(state)?;
     gauge_view_for(state, clock, poll, account.as_deref())
+}
+
+/// The account the ring follows: settings' `tray_account` while it is found and
+/// not hidden, else every account. The switchers offer only those, so the ring
+/// never follows an account they cannot show.
+pub fn tray_account(state: &AppState) -> Result<Option<String>, String> {
+    let Some(id) = state.settings.lock().map_err(|e| e.to_string())?.tray_account.clone() else { return Ok(None) };
+    let shown = accounts(state)?.iter().any(|a| a.id == id && !a.settings.hidden);
+    Ok(shown.then_some(id))
 }
 
 /// gauge_view for `account`. Every account together has no budget, so no ring:
@@ -511,7 +538,7 @@ pub struct WorkSplit {
 pub fn work_split(state: &AppState, clock: &dyn Clock) -> Result<WorkSplit, String> {
     refresh_store(state)?;
     let today = clock.today();
-    let account = state.settings.lock().map_err(|e| e.to_string())?.tray_account.clone();
+    let account = tray_account(state)?;
     let f = scoped(state, Filters {
         from_ts: Some(iso(clock.start_of(today))),
         to_ts: Some(iso(clock.start_of(today.succ_opt().unwrap_or(today)))),
@@ -609,7 +636,7 @@ pub fn report_scope(state: &AppState, account: Option<String>) -> Result<crate::
 #[tauri::command]
 pub fn open_weekly_report(app: tauri::AppHandle, state: tauri::State<AppState>) {
     use tauri::Emitter;
-    let account = state.settings.lock().ok().and_then(|s| s.tray_account.clone());
+    let account = tray_account(&state).ok().flatten();
     crate::tray::show_main(&app);
     let _ = app.emit_to("main", "start-weekly-report", serde_json::json!({ "account": account }));
 }
@@ -785,7 +812,26 @@ mod tests {
 
         let all = gauge_view_for(&state, &clock, false, None).unwrap();
         assert!((all.budget.today - 30.0).abs() < 1e-9);
+
+        // The Overview's split, in one query: what totals gives for each account.
+        refresh_store(&state).unwrap();
+        let store = state.store.lock().unwrap();
+        let split = store.by_account(&PriceTable::seed(), &Filters::default()).unwrap();
+        assert_eq!(split.len(), 2);
+        for row in &split {
+            let one = store.totals(&PriceTable::seed(), &Filters { account: Some(row.account.clone()), ..Default::default() }).unwrap();
+            assert!((row.cost_usd - one.est_cost_usd).abs() < 1e-9, "{}", row.account);
+            assert_eq!(row.sessions, one.sessions);
+        }
+        drop(store);
         assert_eq!(all.budget.ring, budget::Ring::None);
+
+        // The account it follows hidden: the switchers show every account, and so does the ring.
+        state.settings.lock().unwrap().accounts.get_mut(ME).unwrap().hidden = true;
+        let hidden = gauge_view(&state, &clock, false).unwrap();
+        assert_eq!(hidden.account, None);
+        assert!((hidden.budget.today - 25.0).abs() < 1e-9, "every account shown: the hidden one aside");
+        assert_eq!(hidden.budget.ring, budget::Ring::None);
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -805,6 +851,38 @@ mod tests {
         let t = state.store.lock().unwrap().totals(&PriceTable::seed(), &Filters { account: Some(ME.into()), ..Default::default() }).unwrap();
         assert!((t.est_cost_usd - 30.0).abs() < 1e-9);
         assert_eq!(accounts(&state).unwrap().len(), 1);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_folder_no_longer_read_stops_counting_but_a_vanished_file_does_not() {
+        let (dir, state) = two_accounts("forget");
+        refresh_store(&state).unwrap();
+        let work_dir = dir.join("home").join(".claude-work").to_string_lossy().to_string();
+        let total = |s: &AppState| s.store.lock().unwrap().totals(&PriceTable::seed(), &Filters::default()).unwrap().est_cost_usd;
+        let before = total(&state);
+
+        // Still found: kept.
+        forget_unread_dir(&state, &work_dir).unwrap();
+        assert!((total(&state) - before).abs() < 1e-9);
+
+        // A personal transcript deleted by Claude Code: its history stays.
+        fs::remove_file(dir.join("home").join(".claude").join("projects").join("-home-me-app").join("m-personal.jsonl")).unwrap();
+        refresh_store(&state).unwrap();
+        assert!((total(&state) - before).abs() < 1e-9, "a deleted transcript keeps counting");
+
+        // The work folder no longer read: its rows go.
+        {
+            let s = state.settings.lock().unwrap().clone();
+            let mut d = state.discovery.lock().unwrap();
+            let dirs = d.dirs.iter().filter(|x| x.key() != work_dir).cloned().collect();
+            *d = Discovery::new(dirs, &s);
+        }
+        forget_unread_dir(&state, &work_dir).unwrap();
+        let after = total(&state);
+        assert!(after > 0.0 && after < before, "{after} of {before}");
+        let sessions = state.store.lock().unwrap().totals(&PriceTable::seed(), &Filters::default()).unwrap();
+        assert_eq!(sessions.sessions, 1, "only the personal session is left");
         fs::remove_dir_all(&dir).ok();
     }
 

@@ -21,14 +21,17 @@ function startedLabel(s: string | null) { return s ? s.slice(0, 16).replace("T",
 
 export default function Sessions() {
   const { filters } = useFilters();
-  const { sessionsProject, openSession, setScreen } = useNav();
+  const { sessionsProject, sessionsAccount, openSession, setScreen } = useNav();
   const [sort, setSort] = useState<SortKey>("started_at");
 
-  // When arriving from a Projects row, override the project filter.
-  const effective = sessionsProject ? { ...filters, project: sessionsProject } : filters;
+  // When arriving from a Projects row, override the project filter, and the
+  // account too: the row was one account's use of that folder.
+  const effective = sessionsProject
+    ? { ...filters, project: sessionsProject, account: sessionsAccount ?? filters.account }
+    : filters;
   const q = useQuery({ queryKey: ["sessions", effective], queryFn: () => getSessions(effective) });
   const accounts = useAccounts();
-  const chips = showAccountChips(accounts.data, filters.account);
+  const chips = showAccountChips(accounts.data, effective.account);
 
   const rows = useMemo(() => {
     const data = [...(q.data ?? [])];
@@ -57,6 +60,7 @@ export default function Sessions() {
         <div className="mb-2 inline-flex items-center gap-2 text-xs rounded-md border border-line bg-elevated px-2 py-1">
           <span className="text-muted">Filtered to</span>
           <span className="text-ink font-mono">{sessionsProject}</span>
+          {sessionsAccount && sessionsAccount !== filters.account && <AccountChip id={sessionsAccount} accounts={accounts.data} />}
           <button className="text-muted hover:text-ink" onClick={() => setScreen("sessions")}>✕</button>
         </div>
       )}

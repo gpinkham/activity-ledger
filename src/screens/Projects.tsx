@@ -55,7 +55,7 @@ export default function Projects() {
             <tr
               key={`${p.account}|${p.project}`}
               className="border-b border-line/50 hover:bg-elevated/50 cursor-pointer"
-              onClick={() => openSessionsForProject(p.project)}
+              onClick={() => openSessionsForProject(p.project, p.account)}
             >
               <td className="px-2 py-1">
                 <span className="flex items-center gap-2">
