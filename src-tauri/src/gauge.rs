@@ -88,6 +88,7 @@ impl Call {
         self.cache_read = self.cache_read.max(o.cache_read);
         self.e1h = self.e1h.max(o.e1h);
         self.e5m = self.e5m.max(o.e5m);
+        self.e5m = crate::parser::merged_5m(self.cache_creation, self.e1h, self.e5m);
         self.web_searches = self.web_searches.max(o.web_searches);
     }
 }
