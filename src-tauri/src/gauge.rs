@@ -88,6 +88,7 @@ impl Call {
         self.cache_read = self.cache_read.max(o.cache_read);
         self.e1h = self.e1h.max(o.e1h);
         self.e5m = self.e5m.max(o.e5m);
+        self.e5m = crate::parser::merged_5m(self.cache_creation, self.e1h, self.e5m);
         self.web_searches = self.web_searches.max(o.web_searches);
     }
 }
@@ -459,6 +460,36 @@ mod tests {
         assert_eq!((s2.opened, s2.reread), (1, 0));
         assert_eq!(s2.bytes_read, fs::metadata(&f).unwrap().len() - before, "only the appended bytes are read");
         assert!((t.spend(&list(), &clock).today - 30.0).abs() < 1e-9);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_bare_total_then_its_split_in_a_later_poll_counts_the_writes_once() {
+        let root = dir("bare_total");
+        let f = root.join("-Users-me-proj").join("a.jsonl");
+        let line = |usage: serde_json::Value| serde_json::json!({"type":"assistant","sessionId":"s","timestamp":"2026-10-15T12:00:00.000Z",
+            "message":{"id":"m1","role":"assistant","model":"claude-opus-4-8","usage":usage}}).to_string() + "\n";
+        let bare = line(serde_json::json!({"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":M}));
+        let split = line(serde_json::json!({"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":M,
+            "cache_creation":{"ephemeral_1h_input_tokens":600_000,"ephemeral_5m_input_tokens":400_000}}));
+        fs::write(&f, &bare).unwrap();
+        let clock = UtcClock(day(2026, 10, 15));
+        let mut t = Tally::new();
+        t.poll(&root, &clock);
+        // A bare total is 5 minute writes: 1M at 1.25 x $5.
+        assert!((t.spend(&list(), &clock).today - 6.25).abs() < 1e-9);
+
+        let mut w = fs::OpenOptions::new().append(true).open(&f).unwrap();
+        w.write_all(split.as_bytes()).unwrap();
+        drop(w);
+        t.poll(&root, &clock);
+        // The split wins: 600k 1 hour at 2 x $5 and 400k 5 minute at 1.25 x $5, not the total again.
+        let today = t.spend(&list(), &clock).today;
+        assert!((today - 8.5).abs() < 1e-9, "{today}");
+        // The same call read in one go by the parser prices the same.
+        let m = parse_str("p", &(bare + &split)).messages.remove(0);
+        let tb = TokenBreakdown { cache_creation_1h: m.ephemeral_1h, cache_creation_5m: m.ephemeral_5m, ..Default::default() };
+        assert!((list().table.cost("claude-opus-4-8", &tb) - today).abs() < 1e-9);
         fs::remove_dir_all(&root).ok();
     }
 
