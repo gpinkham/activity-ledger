@@ -108,22 +108,32 @@ fn mostly(now: &[&DaySpend], before: &[&DaySpend]) -> Option<String> {
     (grew > MOSTLY * rise).then(|| name.clone())
 }
 
+/// A day's own jump: its total (at its end, or so far for today) against the 7
+/// complete days before it.
+fn day_jump<'a>(on: NaiveDate, days: &'a BTreeMap<NaiveDate, DaySpend>, daily_allowance: f64, none: &'a DaySpend) -> Option<(f64, Vec<&'a DaySpend>, &'a DaySpend)> {
+    let (usual, before) = baseline(days, on - Duration::days(BASELINE_DAYS), on - Duration::days(1))?;
+    let now = days.get(&on).unwrap_or(none);
+    is_jump(now.total, usual, daily_allowance).then_some((usual, before, now))
+}
+
 /// The jump to show, if any. `days` holds the gauge's day totals up to and
 /// including `today`; a day missing from it spent nothing. Today is checked
-/// first; the recent days only when today is not a jump.
+/// first; the recent days only when today is not a jump, and only when none of
+/// those 3 days was a jump of its own. A step up already showed as a jump on the
+/// day it happened, so it is not told again for the next 3 days.
 pub fn jump(today: NaiveDate, days: &BTreeMap<NaiveDate, DaySpend>, daily_allowance: f64) -> Option<Jump> {
     let none = DaySpend::default();
-    let day = |n: i64| days.get(&(today - Duration::days(n))).unwrap_or(&none);
+    let back = |n: i64| today - Duration::days(n);
 
-    if let Some((usual, before)) = baseline(days, today - Duration::days(BASELINE_DAYS), today - Duration::days(1)) {
-        let now = day(0);
-        if is_jump(now.total, usual, daily_allowance) {
-            return Some(Jump { kind: JumpKind::Today, times: now.total / usual, spent: now.total, usual, project: mostly(&[now], &before) });
-        }
+    if let Some((usual, before, now)) = day_jump(today, days, daily_allowance, &none) {
+        return Some(Jump { kind: JumpKind::Today, times: now.total / usual, spent: now.total, usual, project: mostly(&[now], &before) });
     }
 
-    let (usual, before) = baseline(days, today - Duration::days(HISTORY_DAYS), today - Duration::days(RECENT_DAYS + 1))?;
-    let recent: Vec<&DaySpend> = (1..=RECENT_DAYS).map(day).collect();
+    let (usual, before) = baseline(days, back(HISTORY_DAYS), back(RECENT_DAYS + 1))?;
+    if (1..=RECENT_DAYS).any(|n| day_jump(back(n), days, daily_allowance, &none).is_some()) {
+        return None;
+    }
+    let recent: Vec<&DaySpend> = (1..=RECENT_DAYS).map(|n| days.get(&back(n)).unwrap_or(&none)).collect();
     let spent = recent.iter().map(|s| s.total).sum::<f64>() / RECENT_DAYS as f64;
     is_jump(spent, usual, daily_allowance)
         .then(|| Jump { kind: JumpKind::Recent, times: spent / usual, spent, usual, project: mostly(&recent, &before) })
@@ -212,14 +222,43 @@ mod tests {
         assert!(jump(today(), &days(today(), &back), 50.0).is_none(), "the 7th day back is inside it");
     }
 
+    /// A rise over 3 days where no single day was a jump of its own: $59, $62 and
+    /// $65 (oldest first) after $40 days. Each day's own week includes the days
+    /// before it, so none reaches 1.5 times; together they average $62.
+    const GRADUAL: [f64; 3] = [65.0, 62.0, 59.0];
+
     #[test]
     fn three_days_up_on_the_week_before_is_a_recent_jump() {
-        // Today is quiet; the 3 days before it average $72 against $40.
-        let back = [5.0, 72.0, 72.0, 72.0, 40.0, 40.0, 40.0, 40.0, 40.0, 0.0, 0.0];
+        let mut back = vec![5.0];
+        back.extend(GRADUAL);
+        back.extend([40.0, 40.0, 40.0, 40.0, 40.0, 0.0, 0.0]);
         let j = jump(today(), &days(today(), &back), 50.0).unwrap();
         assert_eq!(j.kind, JumpKind::Recent);
-        assert!((j.times - 1.8).abs() < 1e-9);
-        assert_eq!((j.spent, j.usual), (72.0, 40.0));
+        assert!((j.times - 1.55).abs() < 1e-9);
+        assert_eq!((j.spent, j.usual), (62.0, 40.0));
+    }
+
+    #[test]
+    fn a_step_up_that_was_already_a_jump_is_not_told_again_as_up_for_3_days() {
+        // $72 days after $40 days: the first $72 day was a jump on the day. The
+        // 3 days after it are not repeated as "Up for 3 days".
+        for (n, back) in [
+            vec![5.0, 72.0, 72.0, 72.0, 40.0, 40.0, 40.0, 40.0, 40.0],
+            // One $100 day 3 days back carries the 3-day average to $60 on its own.
+            vec![5.0, 40.0, 40.0, 100.0, 40.0, 40.0, 40.0, 40.0, 40.0],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(jump(today(), &days(today(), &back), 50.0).is_none(), "case {n}");
+        }
+        // The day itself still shows, as Today.
+        assert_eq!(jump(today(), &days(today(), &[72.0, 40.0, 40.0, 40.0, 40.0, 40.0]), 50.0).unwrap().kind, JumpKind::Today);
+        // Once the jump day is more than 3 days back, a rise after it can show again.
+        let mut back = vec![5.0];
+        back.extend(GRADUAL);
+        back.extend([40.0, 40.0, 40.0, 40.0, 40.0, 0.0, 0.0]);
+        assert!(jump(today(), &days(today(), &back), 50.0).is_some());
     }
 
     #[test]
@@ -227,7 +266,9 @@ mod tests {
         let back = [5.0, 72.0, 72.0, 72.0, 40.0, 40.0, 0.0, 0.0, 0.0, 0.0, 0.0];
         assert!(jump(today(), &days(today(), &back), 50.0).is_none(), "2 active days");
         // The 11th day back is outside its week; the 10th is inside it.
-        let mut back = vec![5.0, 72.0, 72.0, 72.0, 40.0, 40.0, 0.0, 0.0, 0.0, 0.0, 0.0, 40.0];
+        let mut back = vec![5.0];
+        back.extend(GRADUAL);
+        back.extend([40.0, 40.0, 0.0, 0.0, 0.0, 0.0, 0.0, 40.0]);
         assert!(jump(today(), &days(today(), &back), 50.0).is_none());
         back[10] = 40.0;
         assert!(jump(today(), &days(today(), &back), 50.0).is_some());
@@ -276,8 +317,12 @@ mod tests {
     #[test]
     fn a_recent_jump_names_its_project_over_the_3_days() {
         let base: &[(&str, f64)] = &[("app", 40.0)];
-        let up: &[(&str, f64)] = &[("app", 40.0), ("new-thing", 32.0)];
-        let all = with_projects(&[(1, up), (2, up), (3, up), (4, base), (5, base), (6, base)]);
+        let all = with_projects(&[
+            (1, &[("app", 40.0), ("new-thing", 25.0)]),
+            (2, &[("app", 40.0), ("new-thing", 22.0)]),
+            (3, &[("app", 40.0), ("new-thing", 19.0)]),
+            (4, base), (5, base), (6, base), (7, base), (8, base),
+        ]);
         let j = jump(today(), &all, 50.0).unwrap();
         assert_eq!((j.kind, j.project.as_deref()), (JumpKind::Recent, Some("new-thing")));
     }

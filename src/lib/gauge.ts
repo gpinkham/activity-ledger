@@ -49,7 +49,15 @@ export function jumpLine(j: Jump): string {
   const line = j.kind === "today"
     ? `Today is ${times} times a usual day (${money(j.spent)} so far, usually about ${money(j.usual)}).`
     : `Up for 3 days: about ${times} times the week before (${money(j.spent)} a day, usually about ${money(j.usual)}).`;
-  return j.project ? `${line} Mostly from ${j.project}.` : line;
+  return j.project ? `${line} Mostly from ${shortProject(j.project)}.` : line;
+}
+
+/** A project folder's name without the home folder Claude Code encodes into it:
+ *  "-Users-me-dev-app" is "dev-app", as is "C--Users-me-dev-app" on Windows. For
+ *  the panel only; anything else is left as it is. */
+export function shortProject(folder: string): string {
+  const m = /^(?:[A-Za-z]-)?-(?:Users|home)-[^-]+-(.+)$/.exec(folder);
+  return m ? m[1] : folder;
 }
 
 export function remainingLine(b: BudgetView): string {
