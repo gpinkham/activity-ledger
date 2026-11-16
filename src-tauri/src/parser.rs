@@ -160,6 +160,11 @@ pub fn parse_with(project: &str, content: &str, matcher: &Matcher) -> ParsedFile
             if usage.speed.as_deref() == Some("fast") { fast_key(m) } else { m.to_string() }
         });
 
+        let (ephemeral_1h, ephemeral_5m) = write_buckets(
+            usage.cache_creation_input_tokens,
+            usage.cache_creation.ephemeral_1h_input_tokens,
+            usage.cache_creation.ephemeral_5m_input_tokens,
+        );
         let record = MessageRecord {
             session_id: session_id.clone(),
             project: project.to_string(),
@@ -174,8 +179,8 @@ pub fn parse_with(project: &str, content: &str, matcher: &Matcher) -> ParsedFile
             output_tokens: usage.output_tokens,
             cache_creation: usage.cache_creation_input_tokens,
             cache_read: usage.cache_read_input_tokens,
-            ephemeral_1h: usage.cache_creation.ephemeral_1h_input_tokens,
-            ephemeral_5m: usage.cache_creation.ephemeral_5m_input_tokens,
+            ephemeral_1h,
+            ephemeral_5m,
             message_id: message_id.clone(),
             agent_id: agent_id.clone(),
             web_searches: usage.server_tool_use.web_search_requests,
@@ -191,6 +196,7 @@ pub fn parse_with(project: &str, content: &str, matcher: &Matcher) -> ParsedFile
                 m.cache_read = m.cache_read.max(record.cache_read);
                 m.ephemeral_1h = m.ephemeral_1h.max(record.ephemeral_1h);
                 m.ephemeral_5m = m.ephemeral_5m.max(record.ephemeral_5m);
+                m.ephemeral_5m = merged_5m(m.cache_creation, m.ephemeral_1h, m.ephemeral_5m);
                 m.web_searches = m.web_searches.max(record.web_searches);
                 if m.stop_reason.is_none() {
                     m.stop_reason = record.stop_reason;
@@ -816,6 +822,21 @@ fn tool_tag_in(name: &str, input: Option<&Value>, cwd: &str) -> Option<String> {
     (edits && is_notes_path(path)).then(|| "notes".into())
 }
 
+/// A call's cache writes as (1 hour, 5 minute). A usage block that gives only the
+/// total, with no `cache_creation` split, counts it as 5 minute writes: the API's
+/// default TTL. Without this those writes would be priced at nothing.
+pub(crate) fn write_buckets(total: i64, e1h: i64, e5m: i64) -> (i64, i64) {
+    if total > 0 && e1h == 0 && e5m == 0 { (0, total) } else { (e1h, e5m) }
+}
+
+/// The 5 minute bucket after merging a call's lines field by field. When one line
+/// gave only the total (counted as 5 minute) and another gave the split, the two
+/// buckets would add up to more than the total; the split wins, and 5 minute keeps
+/// only what the 1 hour bucket leaves.
+pub(crate) fn merged_5m(total: i64, e1h: i64, e5m: i64) -> i64 {
+    if total > 0 && e1h + e5m > total { (total - e1h).max(0) } else { e5m }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -858,6 +879,38 @@ mod tests {
         let p = sample();
         assert_eq!(p.titles.len(), 1);
         assert_eq!(p.titles[0], ("s1".to_string(), "Refactor the parser".to_string()));
+    }
+
+    #[test]
+    fn cache_writes_with_only_a_total_count_as_5_minute() {
+        let line = |id: &str, usage: serde_json::Value| serde_json::json!({"type":"assistant","sessionId":"s","timestamp":"2026-10-01T10:00:00.000Z",
+            "message":{"id":id,"role":"assistant","model":"claude-opus-5-5","usage":usage}}).to_string();
+        let total_only = |n: i64| serde_json::json!({"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":n});
+        let split = |h1: i64, m5: i64| serde_json::json!({"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":h1 + m5,
+            "cache_creation":{"ephemeral_1h_input_tokens":h1,"ephemeral_5m_input_tokens":m5}});
+        let lines = [
+            line("only", total_only(900)),
+            line("split", split(700, 300)),
+            // One call over several lines: a bare total, then the split, then a bare total again.
+            line("mixed", total_only(1000)),
+            line("mixed", split(600, 400)),
+            line("mixed", total_only(1000)),
+            // The other order, with the split all in the 1 hour bucket.
+            line("mixed-1h", split(1000, 0)),
+            line("mixed-1h", total_only(1000)),
+            line("none", serde_json::json!({"input_tokens":1,"output_tokens":1})),
+        ]
+        .join("\n");
+        let p = parse_str("p", &lines);
+        let buckets = |id: &str| {
+            let m = p.messages.iter().find(|m| m.message_id.as_deref() == Some(id)).unwrap();
+            (m.cache_creation, m.ephemeral_1h, m.ephemeral_5m)
+        };
+        assert_eq!(buckets("only"), (900, 0, 900));
+        assert_eq!(buckets("split"), (1000, 700, 300));
+        assert_eq!(buckets("mixed"), (1000, 600, 400));
+        assert_eq!(buckets("mixed-1h"), (1000, 1000, 0));
+        assert_eq!(buckets("none"), (0, 0, 0));
     }
 
     fn activity() -> ParsedFile {
