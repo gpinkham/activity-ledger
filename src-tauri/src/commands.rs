@@ -1,6 +1,7 @@
 use crate::accounts::{Account, Discovery, Root};
 use crate::activity::{ActivityReport, LabelSource};
 use crate::budget::{self, BudgetView, Thresholds};
+use crate::jump::{self, Jump};
 use crate::gauge::{iso, Clock, SystemClock, Tally};
 use crate::exporter::build_bundle;
 use crate::labeller::{self, LabelProgress};
@@ -469,6 +470,8 @@ pub struct GaugeView {
     pub account: Option<String>,
     /// That account's name, for the panel and the tooltip.
     pub account_label: Option<String>,
+    /// Today, or the last 3 days, well above a usual day. Never changes the ring.
+    pub jump: Option<Jump>,
 }
 
 /// Read what the transcripts gained (when `poll`), then price today and the month,
@@ -485,6 +488,18 @@ pub fn tray_account(state: &AppState) -> Result<Option<String>, String> {
     let Some(id) = state.settings.lock().map_err(|e| e.to_string())?.tray_account.clone() else { return Ok(None) };
     let shown = accounts(state)?.iter().any(|a| a.id == id && !a.settings.hidden);
     Ok(shown.then_some(id))
+}
+
+/// The names this Mac's home folders take in project folder names: this user's
+/// home, and the home above each config folder read (a WSL user's among them),
+/// so the panel can leave the user name out of a project's name.
+fn home_prefixes(state: &AppState) -> Result<Vec<String>, String> {
+    let roots = roots(state)?;
+    let homes = state.home.iter().cloned().chain(roots.iter().filter_map(|r| r.projects.parent()?.parent().map(Path::to_path_buf)));
+    let mut out: Vec<String> = homes.flat_map(|h| jump::home_prefixes(&h.to_string_lossy())).collect();
+    out.sort();
+    out.dedup();
+    Ok(out)
 }
 
 /// gauge_view for `account`. Every account together has no budget, so no ring:
@@ -518,9 +533,15 @@ pub fn gauge_view_for(state: &AppState, clock: &dyn Clock, poll: bool, account: 
         Some(id) => accounts(state)?.into_iter().find(|a| a.id == id).map(|a| a.label),
         None => None,
     };
+    let budget = budget::view_for(monthly, spend.day, spend.today, spend.month_to_date, t, weekdays_only);
+    let mut jump = jump::jump(spend.day, &spend.days, budget.daily_allowance);
+    if let Some(project) = jump.as_mut().and_then(|j| j.project.as_mut()) {
+        *project = jump::project_label(project, &home_prefixes(state)?);
+    }
     Ok(GaugeView {
         day: spend.day.to_string(),
-        budget: budget::view_for(monthly, spend.day, spend.today, spend.month_to_date, t, weekdays_only),
+        jump,
+        budget,
         rate_source: prices.source(),
         account: account.map(str::to_string),
         account_label,
@@ -775,6 +796,30 @@ mod tests {
     }
 
     #[test]
+    fn the_jump_names_its_project_without_the_home_folder() {
+        // A home folder whose name has a dot, as "/Users/pat.lee" would.
+        let dir = std::env::temp_dir().join(format!("ci_jump_label_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let home = dir.join("pat.lee");
+        let enc = jump::encode_path(&home.to_string_lossy());
+        let call = |id: &str, day: &str| {
+            format!(r#"{{"type":"assistant","sessionId":"s","timestamp":"2026-10-{day}T10:00:00.000Z","message":{{"id":"{id}","role":"assistant","model":"claude-opus-4-8","usage":{{"input_tokens":1000000}}}}}}"#) + "\n"
+        };
+        let projects = home.join(".claude").join("projects");
+        let (old, new) = (projects.join(format!("{enc}-dev-app")), projects.join(format!("{enc}-dev-new-app")));
+        fs::create_dir_all(&old).unwrap();
+        fs::create_dir_all(&new).unwrap();
+        // $5 a day for 3 days, then $25 today, all of the rise in the new project.
+        fs::write(old.join("a.jsonl"), ["12", "13", "14"].iter().map(|d| call(&format!("m{d}"), d)).collect::<String>()).unwrap();
+        fs::write(new.join("b.jsonl"), (0..5).map(|i| call(&format!("n{i}"), "15")).collect::<String>()).unwrap();
+        let state = state_for(&projects, &dir.join("data"), "");
+        let clock = UtcDay(NaiveDate::from_ymd_opt(2026, 10, 15).unwrap());
+        let j = gauge_view_for(&state, &clock, true, None).unwrap().jump.expect("a jump");
+        assert_eq!(j.project.as_deref(), Some("dev-new-app"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn each_account_is_counted_apart_and_a_hidden_one_leaves_all_accounts() {
         let (dir, state) = two_accounts("split");
         refresh_store(&state).unwrap();
@@ -825,6 +870,42 @@ mod tests {
         let all = gauge_view_for(&state, &saturday, false, None).unwrap().budget;
         assert!(!all.weekdays_only, "all accounts has no budget to spread");
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_weekend_on_a_weekdays_only_budget_judges_the_jump_by_the_weekday_allowance() {
+        // $5 each weekday, Monday 5 to Friday 9 October 2026, then `saturday` dollars on the 10th.
+        let at_saturday = |name: &str, saturday: i64| {
+            let dir = std::env::temp_dir().join(format!("ci_weekend_jump_{name}_{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            let proj = dir.join("home").join(".claude").join("projects").join("-home-me-app");
+            fs::create_dir_all(&proj).unwrap();
+            let call = |id: String, day: u32, input: i64| {
+                format!(r#"{{"type":"assistant","sessionId":"s","timestamp":"2026-10-{day:02}T10:00:00.000Z","message":{{"id":"{id}","role":"assistant","model":"claude-opus-4-8","usage":{{"input_tokens":{input}}}}}}}"#) + "\n"
+            };
+            let mut lines: String = (5..=9).map(|d| call(format!("w{d}"), d, 1_000_000)).collect();
+            lines += &call("sat".into(), 10, saturday * 200_000);
+            fs::write(proj.join("a.jsonl"), lines).unwrap();
+            let state = state_for(&dir.join("home").join(".claude").join("projects"), &dir.join("data"), "");
+            state.settings.lock().unwrap().accounts.get_mut(ME).unwrap().weekdays_only = true;
+            let v = gauge_view(&state, &UtcDay(NaiveDate::from_ymd_opt(2026, 10, 10).unwrap()), true).unwrap();
+            fs::remove_dir_all(&dir).ok();
+            v
+        };
+
+        // $8 is 1.6 times the usual $5 and $3 above it. The weekend's grey ring has no
+        // allowance, but the margin stays a quarter of the weekday one (310 / 22 / 4,
+        // about $3.52), not the $1 used with no budget, so this is no jump.
+        let quiet = at_saturday("quiet", 8);
+        assert_eq!(quiet.budget.ring, budget::Ring::Weekend);
+        assert!((quiet.budget.daily_allowance - 310.0 / 22.0).abs() < 1e-9);
+        assert!(quiet.jump.is_none(), "the grey ring does not lower the bar for a jump");
+
+        // A real step up on a Saturday still shows, and the ring stays grey.
+        let busy = at_saturday("busy", 25);
+        assert_eq!(busy.budget.ring, budget::Ring::Weekend, "a jump never changes the ring");
+        let j = busy.jump.expect("$25 against a usual $5 is a jump");
+        assert_eq!(j.kind, jump::JumpKind::Today);
     }
 
     #[test]
