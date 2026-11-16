@@ -1,7 +1,7 @@
 // The menu bar gauge's panel, opened from the ring in the menu bar. Presentation
 // only: TrayApp loads the figures. Every figure is an estimate and says so.
 import type { GaugeView, WorkSplit } from "../lib/types";
-import { money, paceLine, rateNote, remainingLine, ringClass, ringWord, splitShares } from "../lib/gauge";
+import { jumpLine, money, paceLine, rateNote, remainingLine, ringClass, ringWord, splitShares } from "../lib/gauge";
 
 /** An account the panel can switch the ring to. */
 export interface PanelAccount { id: string; label: string; colour: string }
@@ -104,6 +104,14 @@ export function TrayPanel({ view, split, error, accounts, onPickAccount, onOpen,
       <div className="border-t border-line pt-1">
         <Row label="Month to date" value={set ? `${money(b.month_to_date)} of ${money(b.monthly_budget)}` : money(b.month_to_date)} />
         {set && <Row label="Pace" value={paceLine(b)} />}
+        {view.jump && (
+          // Its own line, in the panel's ink: a jump is not a budget state, so it never
+          // takes the ring's colours.
+          <div className="py-1" data-jump={view.jump.kind}>
+            <span className="text-muted">Jump: </span>
+            <span className="text-ink break-words">{jumpLine(view.jump)}</span>
+          </div>
+        )}
         <Row label="Projected month end" value={money(b.projected)}
           className={set && b.projected > b.monthly_budget ? "text-red-500" : ""} />
         {set && <Row label="Left per day" value={remainingLine(b)} />}

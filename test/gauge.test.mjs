@@ -50,6 +50,43 @@ test("pace, remaining and split wording", () => {
   assert.equal(G.splitShares(0, 0), null);
 });
 
+test("jump wording", () => {
+  const j = { kind: "today", times: 2.1, spent: 84, usual: 40, project: null };
+  assert.equal(G.jumpLine(j), "Today is 2.1 times a usual day ($84.00 so far, usually about $40.00).");
+  assert.equal(G.jumpLine({ ...j, times: 2.0 }), "Today is 2.0 times a usual day ($84.00 so far, usually about $40.00).");
+  assert.equal(G.jumpLine({ kind: "recent", times: 1.8, spent: 72, usual: 40, project: null }),
+    "Up for 3 days: about 1.8 times the week before ($72.00 a day, usually about $40.00).");
+  assert.equal(G.jumpLine({ ...j, project: "new-thing" }),
+    "Today is 2.1 times a usual day ($84.00 so far, usually about $40.00). Mostly from new-thing.");
+  for (const line of [G.jumpLine(j), G.jumpLine({ ...j, kind: "recent" })]) {
+    assert.ok(!/signal|alert|[\u2013\u2014]/i.test(line), line);
+  }
+});
+
+test("the panel shows the project name the backend gives it, as it is", () => {
+  for (const project of ["dev-app", "the home folder"]) {
+    const h = html({ view: { ...view(budget()), jump: { kind: "today", times: 2, spent: 80, usual: 40, project } }, split: null });
+    assert.ok(h.includes(`Mostly from ${project}.`), project);
+  }
+});
+
+test("the jump shows as its own line and never changes the ring", () => {
+  const jump = { kind: "today", times: 2.1, spent: 84, usual: 40, project: null };
+  for (const ring of ["green", "amber", "red"]) {
+    const b = budget({ ring });
+    const plain = html({ view: view(b), split: null });
+    const withJump = html({ view: { ...view(b), jump }, split: null });
+    assert.ok(!plain.includes("data-jump"), "no jump, no line");
+    assert.match(withJump, /data-jump="today"[^>]*>.*Jump: .*Today is 2\.1 times a usual day/);
+    const ringPart = (h) => h.match(/data-ring="[a-z]+"[^>]*>[^<]*/)[0];
+    assert.equal(ringPart(withJump), ringPart(plain), `the ring is the same with a jump (${ring})`);
+    assert.ok(!/data-jump[^>]*class="[^"]*(red|amber|emerald)/.test(withJump), "and the line takes none of its colours");
+  }
+  const none = html({ view: { ...view(budget({ ring: "none", monthly_budget: 0 })), jump }, split: null });
+  assert.match(none, /data-jump/, "no budget set: the jump still shows");
+  assert.ok(!html({ view: { ...view(budget()), jump: null }, split: null }).includes("data-jump"));
+});
+
 test("the budget form refuses what the gauge cannot use", () => {
   assert.equal(G.checkBudget(300, 80, 100), null);
   assert.equal(G.checkBudget(0, 80, 100), null, "0 is no budget");

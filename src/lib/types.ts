@@ -96,8 +96,16 @@ export interface BudgetView {
   daily_allowance: number; today: number; today_share: number; month_to_date: number;
   on_pace: number; projected: number; remaining_per_day: number; ring: Ring;
 }
+/** Today, or the last 3 days, well above a usual day (see src-tauri/src/jump.rs). */
+export interface Jump {
+  kind: "today" | "recent"; times: number; spent: number; usual: number;
+  /** The project behind most of the rise, named without the home folder, or "the home folder". */
+  project: string | null;
+}
 export interface GaugeView {
   day: string; budget: BudgetView; rate_source: "configured" | "list";
+  /** Absent from an older backend, null when there is no jump. */
+  jump?: Jump | null;
   /** The account the ring follows, and its name; none is every account (no budget, no ring). */
   account?: string | null; account_label?: string | null;
 }

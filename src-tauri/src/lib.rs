@@ -4,6 +4,7 @@ pub mod activity;
 pub mod budget;
 pub mod exporter;
 pub mod gauge;
+pub mod jump;
 pub mod labeller;
 pub mod metrics;
 pub mod models;

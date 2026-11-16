@@ -1,6 +1,6 @@
 // Wording and checks for the menu bar budget gauge (TrayPanel, BudgetCard). Plain
 // functions, tested in test/gauge.test.mjs.
-import type { BudgetView, GaugeView, Ring } from "./types";
+import type { BudgetView, GaugeView, Jump, Ring } from "./types";
 
 export const money = (n: number) => `$${n.toFixed(2)}`;
 
@@ -40,6 +40,17 @@ export function paceLine(b: BudgetView): string {
   const d = b.month_to_date - b.on_pace;
   if (Math.abs(d) < 0.005) return "On an even pace";
   return d > 0 ? `${money(d)} ahead of an even pace` : `${money(-d)} under an even pace`;
+}
+
+/** The jump line's words. "Today is 2.1 times a usual day ($84.00 so far, usually
+ *  about $40.00)." or "Up for 3 days: about 1.8 times the week before." */
+export function jumpLine(j: Jump): string {
+  const times = j.times.toFixed(1);
+  const line = j.kind === "today"
+    ? `Today is ${times} times a usual day (${money(j.spent)} so far, usually about ${money(j.usual)}).`
+    : `Up for 3 days: about ${times} times the week before (${money(j.spent)} a day, usually about ${money(j.usual)}).`;
+  // The backend already left the home folder out of the name (jump.rs, project_label).
+  return j.project ? `${line} Mostly from ${j.project}.` : line;
 }
 
 export function remainingLine(b: BudgetView): string {
