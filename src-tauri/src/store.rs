@@ -123,10 +123,11 @@ CREATE TABLE IF NOT EXISTS session_titles (
 
 /// Bump when a stored table changes shape. An older cache is dropped and every
 /// transcript re-read (the cache is derived data; the transcripts are the truth).
-const SCHEMA_VERSION: &str = "11";
+const SCHEMA_VERSION: &str = "12";
 /// Versions whose model labels still hold: only the parsed tables changed since
-/// (11 added the account columns), and a label is keyed by segment, not by file.
-const LABELS_KEPT_FROM: &[&str] = &["10"];
+/// (11 added the account columns; 12 re-reads cache writes that came with only a
+/// total), and a label is keyed by segment, not by file.
+const LABELS_KEPT_FROM: &[&str] = &["10", "11"];
 const DATA_TABLES: &str = "DROP TABLE IF EXISTS messages; DROP TABLE IF EXISTS tool_calls;
     DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS session_titles; DROP TABLE IF EXISTS files;
     DROP TABLE IF EXISTS prompts; DROP TABLE IF EXISTS subagents; DROP TABLE IF EXISTS cost_states;
@@ -392,6 +393,25 @@ mod tests {
         // The line the model was sent depends on the trigger file, so its labels go too.
         assert!(store.model_labels("m").unwrap().is_empty(), "labels made with another trigger file are redone");
         assert!(!store.use_triggers("md-on").unwrap(), "the same file again: nothing to do");
+    }
+
+    #[test]
+    fn a_schema_bump_rereads_the_transcripts_and_keeps_labels_from_a_kept_version() {
+        let reopen = |from: &str| {
+            let store = seed();
+            store.save_model_label("s|t", "m", "coding").unwrap();
+            store.conn.execute("UPDATE meta SET value = ?1 WHERE key = 'schema_version'", params![from]).unwrap();
+            Store::init(store.conn).unwrap()
+        };
+        let store = reopen("11");
+        let n: i64 = store.conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0, "the parsed rows go");
+        assert!(store.needs_parse("/x/proj-a/s1.jsonl", 123, 456), "so every file is read again");
+        assert_eq!(store.model_labels("m").unwrap().get("s|t").map(String::as_str), Some("coding"), "labels from 11 are kept");
+        let version: String = store.conn.query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        // A version not in LABELS_KEPT_FROM drops the labels too.
+        assert!(reopen("9").model_labels("m").unwrap().is_empty());
     }
 
     fn seed() -> Store {
