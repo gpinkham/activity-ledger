@@ -173,12 +173,18 @@ pub fn home_prefixes(home: &str) -> Vec<String> {
 
 /// The project folder's name for the panel: without the home folder it starts
 /// with (so no part of a user name shows), or `HOME_FOLDER` for the home folder
-/// itself, and with no leading `-`.
+/// itself, and with no leading `-`. The home folder matches in any ASCII case, so
+/// a drive letter or a home recorded in another case (`c:`, `/Users/Me`) is
+/// still taken off.
 pub fn project_label(folder: &str, prefixes: &[String]) -> String {
     let mut by_length: Vec<&String> = prefixes.iter().collect();
     by_length.sort_by_key(|p| std::cmp::Reverse(p.len()));
     for p in by_length {
-        let Some(rest) = folder.strip_prefix(p.as_str()) else { continue };
+        let Some(head) = folder.get(..p.len()) else { continue };
+        if !head.eq_ignore_ascii_case(p) {
+            continue;
+        }
+        let rest = &folder[p.len()..];
         if rest.is_empty() {
             return HOME_FOLDER.to_string();
         }
@@ -427,6 +433,18 @@ mod tests {
     fn a_longer_home_wins_and_a_name_that_only_starts_the_same_is_not_cut() {
         assert_eq!(label("-Users-alex2-app", &["/Users/alex"]), "Users-alex2-app", "alex is not alex2");
         assert_eq!(label("-Users-alex-b-app", &["/Users/alex", "/Users/alex.b"]), "app");
+        assert_eq!(label("-Users-ALEX2-app", &["/Users/alex"]), "Users-ALEX2-app", "in any case");
+        assert_eq!(label("-users-alex-b-app", &["/Users/alex", "/Users/Alex.B"]), "app", "in any case");
+    }
+
+    #[test]
+    fn the_home_folder_is_taken_off_in_any_case() {
+        assert_eq!(label("c--Users-alex-dev-app", &[r"C:\Users\alex"]), "dev-app", "a lowercase drive letter");
+        assert_eq!(label("C--Users-alex-dev-app", &[r"c:\Users\alex"]), "dev-app", "a lowercase drive in the home");
+        assert_eq!(label("-Users-Pat-Lee-dev-app", &["/Users/pat.lee"]), "dev-app", "a macOS home in another case");
+        assert_eq!(label("-users-pat-lee", &["/Users/Pat.Lee"]), HOME_FOLDER);
+        assert_eq!(label("-mnt-C-Users-Alex-app", &[r"C:\Users\alex"]), "app", "WSL with an upper case drive");
+        assert_eq!(label("-Users-Alex-Dev-App", &["/Users/alex"]), "Dev-App", "the rest keeps its case");
     }
 
     #[test]
