@@ -1,6 +1,7 @@
 use crate::accounts::{Account, Discovery, Root};
 use crate::activity::{ActivityReport, LabelSource};
 use crate::budget::{self, BudgetView, Thresholds};
+use crate::jump::{self, Jump};
 use crate::gauge::{iso, Clock, SystemClock, Tally};
 use crate::exporter::build_bundle;
 use crate::labeller::{self, LabelProgress};
@@ -469,6 +470,8 @@ pub struct GaugeView {
     pub account: Option<String>,
     /// That account's name, for the panel and the tooltip.
     pub account_label: Option<String>,
+    /// Today, or the last 3 days, well above a usual day. Never changes the ring.
+    pub jump: Option<Jump>,
 }
 
 /// Read what the transcripts gained (when `poll`), then price today and the month,
@@ -518,9 +521,11 @@ pub fn gauge_view_for(state: &AppState, clock: &dyn Clock, poll: bool, account: 
         Some(id) => accounts(state)?.into_iter().find(|a| a.id == id).map(|a| a.label),
         None => None,
     };
+    let budget = budget::view(monthly, spend.day, spend.today, spend.month_to_date, t);
     Ok(GaugeView {
         day: spend.day.to_string(),
-        budget: budget::view(monthly, spend.day, spend.today, spend.month_to_date, t),
+        jump: jump::jump(spend.day, &spend.days, budget.daily_allowance),
+        budget,
         rate_source: prices.source(),
         account: account.map(str::to_string),
         account_label,

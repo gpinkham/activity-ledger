@@ -9,6 +9,7 @@
 //! days.
 
 use crate::budget::first_of_month;
+use crate::jump::{history_start, DaySpend};
 use crate::models::MessageRecord;
 use crate::parser::parse_str;
 use crate::pricing::{long_key, GaugePrices, PriceTable, TokenBreakdown};
@@ -53,6 +54,8 @@ pub fn iso(t: DateTime<Utc>) -> String {
 #[derive(Debug, Clone, PartialEq)]
 struct Call {
     model: Option<String>,
+    /// The project folder, for the jump line's "mostly from".
+    project: String,
     day: Option<NaiveDate>,
     input: i64,
     output: i64,
@@ -68,6 +71,7 @@ impl Call {
         let day = DateTime::parse_from_rfc3339(&m.ts).ok().map(|t| clock.date_of(t.with_timezone(&Utc)));
         Call {
             model: m.model.clone(),
+            project: m.project.clone(),
             day,
             input: m.input_tokens,
             output: m.output_tokens,
@@ -136,6 +140,9 @@ pub struct Spend {
     pub day: NaiveDate,
     pub today: f64,
     pub month_to_date: f64,
+    /// Each day with spend from `jump::history_start` to today, for the jump line.
+    /// The days before the 1st count only here, never in the month to date.
+    pub days: BTreeMap<NaiveDate, DaySpend>,
 }
 
 #[derive(Default)]
@@ -188,15 +195,16 @@ impl Tally {
     }
 
     /// Read what changed under `root` since the last poll. Only files written this
-    /// local month are looked at: an older file holds only older calls.
+    /// local month are looked at (or in the last 10 days, early in a month, for the
+    /// jump line): an older file holds only older calls.
     pub fn poll(&mut self, root: &Path, clock: &dyn Clock) -> PollStats {
         self.poll_roots(&unassigned(root), clock)
     }
 
     /// poll, over every transcript folder at once (a file gone from all of them is forgotten).
     pub fn poll_roots(&mut self, roots: &[Root], clock: &dyn Clock) -> PollStats {
-        let month_start = first_of_month(clock.today());
-        let since = clock.start_of(month_start).timestamp();
+        let keep_from = history_start(clock.today());
+        let since = clock.start_of(keep_from).timestamp();
         let mut stats = PollStats::default();
         let mut live: HashSet<PathBuf> = HashSet::new();
         for sf in scan_roots(roots) {
@@ -215,9 +223,9 @@ impl Tally {
         for p in gone {
             self.forget_file(&p);
         }
-        // Calls from before this month no longer count; keep the map small.
+        // Calls from before the kept days no longer count; keep the map small.
         self.calls.retain(|_, copies| {
-            copies.retain(|_, c| c.day.is_none_or(|d| d >= month_start));
+            copies.retain(|_, c| c.day.is_none_or(|d| d >= keep_from));
             !copies.is_empty()
         });
         stats
@@ -294,7 +302,8 @@ impl Tally {
         }
     }
 
-    /// Today's and this month's cost, priced the way the day view prices a day.
+    /// Today's and this month's cost, priced the way the day view prices a day, and
+    /// each kept day's cost by project.
     pub fn spend(&self, prices: &GaugePrices, clock: &dyn Clock) -> Spend {
         self.spend_in(prices, clock, |_| true)
     }
@@ -304,7 +313,10 @@ impl Tally {
     pub fn spend_in(&self, prices: &GaugePrices, clock: &dyn Clock, keep: impl Fn(&str) -> bool) -> Spend {
         let today = clock.today();
         let month_start = first_of_month(today);
-        let mut sums: BTreeMap<(NaiveDate, String), TokenBreakdown> = BTreeMap::new();
+        let keep_from = history_start(today);
+        // By project too: pricing is per token, so a day priced by project and model
+        // adds up to the day priced by model.
+        let mut sums: BTreeMap<(NaiveDate, String, String), TokenBreakdown> = BTreeMap::new();
         for copies in self.calls.values() {
             // The newest file's copy, to the second; a tie goes to the first path.
             let Some((path, c)) = copies.iter().min_by(|(a, _), (b, _)| {
@@ -317,11 +329,11 @@ impl Tally {
                 continue;
             }
             let Some(day) = c.day else { continue };
-            if day < month_start || day > today {
+            if day < keep_from || day > today {
                 continue;
             }
             let key = model_key(&prices.table, c);
-            let tb = sums.entry((day, key)).or_default();
+            let tb = sums.entry((day, c.project.clone(), key)).or_default();
             tb.input += c.input;
             tb.output += c.output;
             tb.cache_read += c.cache_read;
@@ -329,10 +341,15 @@ impl Tally {
             tb.cache_creation_5m += c.e5m;
             tb.web_searches += c.web_searches;
         }
-        let mut spend = Spend { day: today, today: 0.0, month_to_date: 0.0 };
-        for ((day, key), tb) in &sums {
+        let mut spend = Spend { day: today, today: 0.0, month_to_date: 0.0, days: BTreeMap::new() };
+        for ((day, project, key), tb) in &sums {
             let cost = prices.cost(key, tb);
-            spend.month_to_date += cost;
+            let d = spend.days.entry(*day).or_default();
+            d.total += cost;
+            *d.by_project.entry(project.clone()).or_default() += cost;
+            if *day >= month_start {
+                spend.month_to_date += cost;
+            }
             if *day == today {
                 spend.today += cost;
             }
@@ -656,6 +673,36 @@ mod tests {
         let future = UtcClock(day(2099, 1, 1));
         let s = t.poll(&root, &future);
         assert_eq!((s.files_seen, s.opened), (0, 0));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn early_in_a_month_the_10_days_before_are_kept_for_the_jump_but_not_counted() {
+        let root = dir("history");
+        let proj = root.join("-Users-me-proj");
+        fs::create_dir_all(root.join("-Users-me-other")).unwrap();
+        let mut lines = String::new();
+        lines += &call("m0", "claude-opus-4-8", "2026-10-23T12:00:00.000Z", M, 0); // 11 days back
+        lines += &call("m1", "claude-opus-4-8", "2026-10-24T12:00:00.000Z", M, 0); // 10 days back
+        lines += &call("m2", "claude-opus-4-8", "2026-10-31T12:00:00.000Z", 2 * M, 0);
+        lines += &call("m3", "claude-opus-4-8", "2026-11-03T12:00:00.000Z", 0, M);
+        fs::write(proj.join("a.jsonl"), lines).unwrap();
+        fs::write(root.join("-Users-me-other").join("b.jsonl"), call("m4", "claude-opus-4-8", "2026-11-03T13:00:00.000Z", M, 0)).unwrap();
+        let clock = UtcClock(day(2026, 11, 3));
+        let mut t = Tally::new();
+        t.poll(&root, &clock);
+        let s = t.spend(&list(), &clock);
+        assert!((s.month_to_date - 30.0).abs() < 1e-9, "October is not November's");
+        assert!((s.today - 30.0).abs() < 1e-9);
+        let totals: Vec<(NaiveDate, f64)> = s.days.iter().map(|(d, v)| (*d, (v.total * 100.0).round() / 100.0)).collect();
+        assert_eq!(totals, vec![(day(2026, 10, 24), 5.0), (day(2026, 10, 31), 10.0), (day(2026, 11, 3), 30.0)]);
+        let today = &s.days[&day(2026, 11, 3)].by_project;
+        assert!((today["-Users-me-proj"] - 25.0).abs() < 1e-9 && (today["-Users-me-other"] - 5.0).abs() < 1e-9);
+        assert!(!t.calls.contains_key("m0"), "11 days back is not kept");
+        // Later in the month the October days are let go.
+        let later = UtcClock(day(2026, 11, 20));
+        t.poll(&root, &later);
+        assert!(t.spend(&list(), &later).days.keys().all(|d| *d >= day(2026, 11, 1)));
         fs::remove_dir_all(&root).ok();
     }
 
