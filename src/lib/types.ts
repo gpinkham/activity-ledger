@@ -98,7 +98,9 @@ export interface BudgetView {
 }
 /** Today, or the last 3 days, well above a usual day (see src-tauri/src/jump.rs). */
 export interface Jump {
-  kind: "today" | "recent"; times: number; spent: number; usual: number; project: string | null;
+  kind: "today" | "recent"; times: number; spent: number; usual: number;
+  /** The project behind most of the rise, named without the home folder, or "the home folder". */
+  project: string | null;
 }
 export interface GaugeView {
   day: string; budget: BudgetView; rate_source: "configured" | "list";

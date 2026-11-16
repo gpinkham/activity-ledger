@@ -139,6 +139,58 @@ pub fn jump(today: NaiveDate, days: &BTreeMap<NaiveDate, DaySpend>, daily_allowa
         .then(|| Jump { kind: JumpKind::Recent, times: spent / usual, spent, usual, project: mostly(&recent, &before) })
 }
 
+/// What "Mostly from" calls a project folder that is the home folder itself.
+pub const HOME_FOLDER: &str = "the home folder";
+
+/// A path as Claude Code names its project folder: every character other than an
+/// ASCII letter or digit becomes `-` (`/Users/john.smith` is `-Users-john-smith`).
+pub fn encode_path(path: &str) -> String {
+    path.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
+}
+
+/// The names a home folder can take at the start of a project folder's name: as
+/// written; a WSL home seen from Windows (`\\wsl.localhost\<distro>\home\me`) as
+/// Linux sees it (`/home/me`); and a Windows home (`C:\Users\me`) as WSL sees it
+/// (`/mnt/c/Users/me`).
+pub fn home_prefixes(home: &str) -> Vec<String> {
+    let mut out = vec![encode_path(home)];
+    let unc = home.strip_prefix(r"\\wsl.localhost\").or_else(|| home.strip_prefix(r"\\wsl$\"));
+    if let Some(rest) = unc {
+        if let Some((_distro, inside)) = rest.split_once('\\') {
+            out.push(encode_path(&format!("/{}", inside.replace('\\', "/"))));
+        }
+    }
+    let b = home.as_bytes();
+    if b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/') {
+        let drive = (b[0] as char).to_ascii_lowercase();
+        out.push(encode_path(&format!("/mnt/{drive}/{}", home[3..].replace('\\', "/"))));
+    }
+    out.retain(|p| p.chars().any(|c| c.is_ascii_alphanumeric()));
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The project folder's name for the panel: without the home folder it starts
+/// with (so no part of a user name shows), or `HOME_FOLDER` for the home folder
+/// itself, and with no leading `-`.
+pub fn project_label(folder: &str, prefixes: &[String]) -> String {
+    let mut by_length: Vec<&String> = prefixes.iter().collect();
+    by_length.sort_by_key(|p| std::cmp::Reverse(p.len()));
+    for p in by_length {
+        let Some(rest) = folder.strip_prefix(p.as_str()) else { continue };
+        if rest.is_empty() {
+            return HOME_FOLDER.to_string();
+        }
+        if let Some(rest) = rest.strip_prefix('-') {
+            let rest = rest.trim_start_matches('-');
+            return if rest.is_empty() { HOME_FOLDER.to_string() } else { rest.to_string() };
+        }
+    }
+    let rest = folder.trim_start_matches('-');
+    if rest.is_empty() { folder.to_string() } else { rest.to_string() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,6 +377,56 @@ mod tests {
         ]);
         let j = jump(today(), &all, 50.0).unwrap();
         assert_eq!((j.kind, j.project.as_deref()), (JumpKind::Recent, Some("new-thing")));
+    }
+
+    fn label(folder: &str, homes: &[&str]) -> String {
+        let prefixes: Vec<String> = homes.iter().flat_map(|h| home_prefixes(h)).collect();
+        project_label(folder, &prefixes)
+    }
+
+    #[test]
+    fn the_folder_name_is_claude_codes_encoding_of_the_path() {
+        assert_eq!(encode_path("/Users/john.smith/dev/app"), "-Users-john-smith-dev-app");
+        assert_eq!(encode_path("/Users/me/.claude/skills"), "-Users-me--claude-skills");
+        assert_eq!(encode_path(r"C:\Users\me\app"), "C--Users-me-app");
+    }
+
+    #[test]
+    fn no_part_of_a_user_name_with_a_separator_shows() {
+        assert_eq!(label("-Users-john-smith-dev-app", &["/Users/john.smith"]), "dev-app", "a dot");
+        assert_eq!(label("-Users-Mary-Ann-app", &["/Users/Mary Ann"]), "app", "a space");
+        assert_eq!(label("-Users-jean-luc-app", &["/Users/jean-luc"]), "app", "a hyphen");
+        assert_eq!(label("-home-j-doe-app", &["/home/j_doe"]), "app", "an underscore, on Linux");
+        assert_eq!(label(r"C--Users-john-smith-dev-app", &[r"C:\Users\john.smith"]), "dev-app", "Windows");
+    }
+
+    #[test]
+    fn the_home_folder_itself_is_called_the_home_folder() {
+        assert_eq!(label("-Users-john-smith", &["/Users/john.smith"]), HOME_FOLDER);
+        assert_eq!(label("C--Users-alex", &[r"C:\Users\alex"]), HOME_FOLDER);
+        assert_eq!(label("-home-alex", &[r"\\wsl.localhost\Ubuntu\home\alex"]), HOME_FOLDER);
+    }
+
+    #[test]
+    fn wsl_folders_lose_the_home_folder_too() {
+        let homes = [r"C:\Users\pat.lee", r"\\wsl.localhost\Ubuntu\home\pat_lee"];
+        assert_eq!(label("-home-pat-lee-src-app", &homes), "src-app", "a WSL home, from its root");
+        assert_eq!(label("-mnt-c-Users-pat-lee-work-app", &homes), "work-app", "a Windows folder used from WSL");
+        assert_eq!(label("-mnt-c-Users-pat-lee", &homes), HOME_FOLDER);
+        assert_eq!(label("-home-pat-lee-src-app", &[r"\\wsl$\Debian\home\pat_lee"]), "src-app", "the older wsl$ path");
+    }
+
+    #[test]
+    fn no_leading_dash_is_left() {
+        assert_eq!(label("-Users-alex--claude-skills-followup", &["/Users/alex"]), "claude-skills-followup");
+        assert_eq!(label("-private-tmp-work", &["/Users/alex"]), "private-tmp-work", "outside the home folder");
+        assert_eq!(label("app", &["/Users/alex"]), "app");
+    }
+
+    #[test]
+    fn a_longer_home_wins_and_a_name_that_only_starts_the_same_is_not_cut() {
+        assert_eq!(label("-Users-alex2-app", &["/Users/alex"]), "Users-alex2-app", "alex is not alex2");
+        assert_eq!(label("-Users-alex-b-app", &["/Users/alex", "/Users/alex.b"]), "app");
     }
 
     #[test]

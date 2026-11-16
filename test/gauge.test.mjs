@@ -56,23 +56,18 @@ test("jump wording", () => {
   assert.equal(G.jumpLine({ ...j, times: 2.0 }), "Today is 2.0 times a usual day ($84.00 so far, usually about $40.00).");
   assert.equal(G.jumpLine({ kind: "recent", times: 1.8, spent: 72, usual: 40, project: null }),
     "Up for 3 days: about 1.8 times the week before ($72.00 a day, usually about $40.00).");
-  assert.equal(G.jumpLine({ ...j, project: "-Users-me-new-thing" }),
+  assert.equal(G.jumpLine({ ...j, project: "new-thing" }),
     "Today is 2.1 times a usual day ($84.00 so far, usually about $40.00). Mostly from new-thing.");
   for (const line of [G.jumpLine(j), G.jumpLine({ ...j, kind: "recent" })]) {
     assert.ok(!/signal|alert|[\u2013\u2014]/i.test(line), line);
   }
 });
 
-test("the jump names a project without the home folder in its name", () => {
-  assert.equal(G.shortProject("-Users-me-dev-munder-app"), "dev-munder-app");
-  assert.equal(G.shortProject("-home-me-src-app"), "src-app", "Linux");
-  assert.equal(G.shortProject("C--Users-me-dev-app"), "dev-app", "Windows");
-  assert.equal(G.shortProject("-Users-me"), "-Users-me", "the home folder itself stays as it is");
-  assert.equal(G.shortProject("-private-tmp-work"), "-private-tmp-work", "outside a home folder: unchanged");
-  assert.equal(G.shortProject("app"), "app");
-  const h = html({ view: { ...view(budget()), jump: { kind: "today", times: 2, spent: 80, usual: 40, project: "-Users-somebody-dev-app" } }, split: null });
-  assert.match(h, /Mostly from dev-app\./);
-  assert.ok(!h.includes("somebody"), "the user name never reaches the panel");
+test("the panel shows the project name the backend gives it, as it is", () => {
+  for (const project of ["dev-app", "the home folder"]) {
+    const h = html({ view: { ...view(budget()), jump: { kind: "today", times: 2, spent: 80, usual: 40, project } }, split: null });
+    assert.ok(h.includes(`Mostly from ${project}.`), project);
+  }
 });
 
 test("the jump shows as its own line and never changes the ring", () => {

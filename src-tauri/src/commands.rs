@@ -490,6 +490,18 @@ pub fn tray_account(state: &AppState) -> Result<Option<String>, String> {
     Ok(shown.then_some(id))
 }
 
+/// The names this Mac's home folders take in project folder names: this user's
+/// home, and the home above each config folder read (a WSL user's among them),
+/// so the panel can leave the user name out of a project's name.
+fn home_prefixes(state: &AppState) -> Result<Vec<String>, String> {
+    let roots = roots(state)?;
+    let homes = state.home.iter().cloned().chain(roots.iter().filter_map(|r| r.projects.parent()?.parent().map(Path::to_path_buf)));
+    let mut out: Vec<String> = homes.flat_map(|h| jump::home_prefixes(&h.to_string_lossy())).collect();
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
 /// gauge_view for `account`. Every account together has no budget, so no ring:
 /// each account's budget is its own.
 pub fn gauge_view_for(state: &AppState, clock: &dyn Clock, poll: bool, account: Option<&str>) -> Result<GaugeView, String> {
@@ -522,9 +534,13 @@ pub fn gauge_view_for(state: &AppState, clock: &dyn Clock, poll: bool, account: 
         None => None,
     };
     let budget = budget::view(monthly, spend.day, spend.today, spend.month_to_date, t);
+    let mut jump = jump::jump(spend.day, &spend.days, budget.daily_allowance);
+    if let Some(project) = jump.as_mut().and_then(|j| j.project.as_mut()) {
+        *project = jump::project_label(project, &home_prefixes(state)?);
+    }
     Ok(GaugeView {
         day: spend.day.to_string(),
-        jump: jump::jump(spend.day, &spend.days, budget.daily_allowance),
+        jump,
         budget,
         rate_source: prices.source(),
         account: account.map(str::to_string),
@@ -777,6 +793,30 @@ mod tests {
             *d = Discovery::new(dirs, &settings);
         }
         (dir, state)
+    }
+
+    #[test]
+    fn the_jump_names_its_project_without_the_home_folder() {
+        // A home folder whose name has a dot, as "/Users/pat.lee" would.
+        let dir = std::env::temp_dir().join(format!("ci_jump_label_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let home = dir.join("pat.lee");
+        let enc = jump::encode_path(&home.to_string_lossy());
+        let call = |id: &str, day: &str| {
+            format!(r#"{{"type":"assistant","sessionId":"s","timestamp":"2026-10-{day}T10:00:00.000Z","message":{{"id":"{id}","role":"assistant","model":"claude-opus-4-8","usage":{{"input_tokens":1000000}}}}}}"#) + "\n"
+        };
+        let projects = home.join(".claude").join("projects");
+        let (old, new) = (projects.join(format!("{enc}-dev-app")), projects.join(format!("{enc}-dev-new-app")));
+        fs::create_dir_all(&old).unwrap();
+        fs::create_dir_all(&new).unwrap();
+        // $5 a day for 3 days, then $25 today, all of the rise in the new project.
+        fs::write(old.join("a.jsonl"), ["12", "13", "14"].iter().map(|d| call(&format!("m{d}"), d)).collect::<String>()).unwrap();
+        fs::write(new.join("b.jsonl"), (0..5).map(|i| call(&format!("n{i}"), "15")).collect::<String>()).unwrap();
+        let state = state_for(&projects, &dir.join("data"), "");
+        let clock = UtcDay(NaiveDate::from_ymd_opt(2026, 10, 15).unwrap());
+        let j = gauge_view_for(&state, &clock, true, None).unwrap().jump.expect("a jump");
+        assert_eq!(j.project.as_deref(), Some("dev-new-app"));
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
