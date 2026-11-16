@@ -50,6 +50,47 @@ test("pace, remaining and split wording", () => {
   assert.equal(G.splitShares(0, 0), null);
 });
 
+test("weekdays-only wording", () => {
+  const wk = (over = {}) => budget({ weekdays_only: true, days_in_month: 21, days_left: 11, remaining_per_day: 100, ...over });
+  assert.equal(G.remainingLine(wk()), "$100.00 for each of the 11 weekdays left");
+  assert.equal(G.remainingLine(wk({ days_left: 1, remaining_per_day: 500 })), "$500.00 for today");
+  assert.equal(G.remainingLine(wk({ days_left: 1, remaining_per_day: 500, ring: "weekend" })), "$500.00 for the last weekday");
+  assert.equal(G.remainingLine(wk({ days_left: 0, remaining_per_day: 0 })), "No weekdays left this month");
+  assert.equal(G.remainingLine(budget({ days_left: 17, remaining_per_day: 8.82 })), "$8.82 for each of the 17 days left", "every day: unchanged");
+  assert.equal(G.projectedLine(wk({ no_weekday_yet: true, projected: 45 })), "No weekday yet");
+  assert.equal(G.projectedLine(wk({ projected: 1909.09 })), "$1909.09");
+  assert.equal(G.weekdaysNote(wk()), "Spread over the 21 weekdays this month, Monday to Friday. Weekend spend counts in the month.");
+  assert.equal(G.weekdaysNote(budget()), null);
+  assert.equal(G.ringWord("weekend"), "Weekend: counted in the month");
+  assert.equal(G.ringClass("weekend"), "text-muted");
+});
+
+test("a weekend on a weekdays-only budget shows the dollars, grey, with no allowance", () => {
+  const b = budget({ weekdays_only: true, ring: "weekend", today: 12.5, today_share: 0, days_in_month: 21, days_left: 6 });
+  const h = html({ view: view(b), split: null });
+  assert.match(h, /\$12\.50/, "the weekend spend shows");
+  assert.ok(!/\$12\.50<span[^>]*> of /.test(h), "with no allowance after it");
+  assert.match(h, /data-ring="weekend"[^>]*>Weekend: counted in the month</, "grey words, and no percentage");
+  assert.match(h, /class="text-xs text-muted" data-ring="weekend"/);
+  assert.match(h, /data-weekdays[^>]*>Spread over the 21 weekdays/);
+  assert.match(h, /for each of the 6 weekdays left/);
+  assert.ok(!html({ view: view(budget()), split: null }).includes("data-weekdays"), "every day: no note");
+});
+
+test("a weekdays-only month that starts on a weekend shows no weekday yet", () => {
+  const b = budget({ weekdays_only: true, no_weekday_yet: true, ring: "weekend", days_elapsed: 0, projected: 45, monthly_budget: 30 });
+  const h = html({ view: view(b), split: null });
+  assert.match(h, /Projected month end.*No weekday yet/);
+  assert.ok(!/text-red-500[^"]*"[^>]*>No weekday yet/.test(h), "never red, though 45 is over a 30 budget");
+});
+
+test("the weekdays-only setting is off unless an account turns it on", async () => {
+  const { readFileSync } = await import("node:fs");
+  const card = readFileSync(new URL("../src/components/AccountsCard.tsx", import.meta.url), "utf8");
+  assert.match(card, /checked=\{draft\.weekdays_only \?\? false\}/);
+  assert.match(card, /Weekdays only/);
+});
+
 test("jump wording", () => {
   const j = { kind: "today", times: 2.1, spent: 84, usual: 40, project: null };
   assert.equal(G.jumpLine(j), "Today is 2.1 times a usual day ($84.00 so far, usually about $40.00).");
@@ -84,6 +125,10 @@ test("the jump shows as its own line and never changes the ring", () => {
   }
   const none = html({ view: { ...view(budget({ ring: "none", monthly_budget: 0 })), jump }, split: null });
   assert.match(none, /data-jump/, "no budget set: the jump still shows");
+  const weekend = budget({ weekdays_only: true, ring: "weekend", today_share: 0 });
+  const grey = html({ view: { ...view(weekend), jump }, split: null });
+  assert.match(grey, /data-ring="weekend"[^>]*>Weekend: counted in the month</, "a weekend keeps its grey ring with a jump");
+  assert.match(grey, /data-jump="today"/, "and the jump shows on its own line");
   assert.ok(!html({ view: { ...view(budget()), jump: null }, split: null }).includes("data-jump"));
 });
 

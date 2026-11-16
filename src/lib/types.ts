@@ -90,8 +90,11 @@ export interface AppSettings {
   /** The weekly report letters projects ("Project A") instead of naming them. */
   report_hide_projects: boolean;
 }
-export type Ring = "none" | "green" | "amber" | "red";
+/** "weekend": a Saturday or Sunday on a weekdays-only budget, shown grey. */
+export type Ring = "none" | "green" | "amber" | "red" | "weekend";
 export interface BudgetView {
+  /** Spread over Monday to Friday: the day counts are weekdays. Absent from an older backend. */
+  weekdays_only?: boolean; no_weekday_yet?: boolean;
   monthly_budget: number; days_in_month: number; days_elapsed: number; days_left: number;
   daily_allowance: number; today: number; today_share: number; month_to_date: number;
   on_pace: number; projected: number; remaining_per_day: number; ring: Ring;
@@ -113,6 +116,8 @@ export interface GaugeView {
 export interface AccountSettings {
   label: string | null; colour: string | null; hidden: boolean;
   monthly_budget_usd: number; amber_pct: number; red_pct: number;
+  /** Spread the budget over Monday to Friday. Off by default. */
+  weekdays_only?: boolean;
 }
 /** A Claude Code config folder (~/.claude, ~/.claude-work...) and where it was found. */
 export interface DirInfo { path: string; origin: string; custom: boolean; own_account: string }
