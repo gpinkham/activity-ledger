@@ -40,7 +40,7 @@ fn colour(ring: Ring) -> [u8; 3] {
         Ring::Green => [0x34, 0xC7, 0x59],
         Ring::Amber => [0xFF, 0x9F, 0x0A],
         Ring::Red => [0xFF, 0x3B, 0x30],
-        Ring::None => [0x8E, 0x8E, 0x93],
+        Ring::None | Ring::Weekend => [0x8E, 0x8E, 0x93],
     }
 }
 
@@ -51,7 +51,7 @@ pub fn ring_rgba(ring: Ring, share: f64) -> Vec<u8> {
     let mut px = vec![0u8; n * n * 4];
     let c = (n as f64 - 1.0) / 2.0;
     let (outer, inner) = (c - 1.0, c - 7.0);
-    let fill = if ring == Ring::None { 0.0 } else { share.clamp(0.0, 1.0) };
+    let fill = if matches!(ring, Ring::None | Ring::Weekend) { 0.0 } else { share.clamp(0.0, 1.0) };
     let rgb = colour(ring);
     for y in 0..n {
         for x in 0..n {
@@ -83,6 +83,8 @@ pub fn tooltip(today: f64, allowance: f64, ring: Ring, account: Option<&str>) ->
     if ring == Ring::None {
         let why = if account.is_some() { "no budget set" } else { "budgets are per account" };
         format!("{who}: today ${today:.2} ({why})")
+    } else if ring == Ring::Weekend {
+        format!("{who}: weekend ${today:.2} (counted in the month)")
     } else {
         format!("{who}: today ${today:.2} of ${allowance:.2} ({:.0}%)", today / allowance * 100.0)
     }
@@ -422,9 +424,15 @@ mod tests {
     }
 
     #[test]
+    fn a_weekend_on_a_weekdays_only_budget_is_the_grey_track_whatever_was_spent() {
+        assert_eq!(ring_rgba(Ring::Weekend, 3.0), ring_rgba(Ring::None, 0.0));
+    }
+
+    #[test]
     fn the_tooltip_says_the_share_or_that_no_budget_is_set() {
         assert_eq!(tooltip(4.1, 9.677, Ring::Green, Some("Acme")), "Activity Ledger · Acme: today $4.10 of $9.68 (42%)");
         assert_eq!(tooltip(4.1, 0.0, Ring::None, Some("Personal")), "Activity Ledger · Personal: today $4.10 (no budget set)");
         assert_eq!(tooltip(6.0, 0.0, Ring::None, None), "Activity Ledger · all accounts: today $6.00 (budgets are per account)");
+        assert_eq!(tooltip(12.0, 100.0, Ring::Weekend, Some("Acme")), "Activity Ledger · Acme: weekend $12.00 (counted in the month)");
     }
 }

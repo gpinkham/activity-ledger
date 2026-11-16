@@ -21,11 +21,14 @@ pub struct AccountSettings {
     pub amber_pct: f64,
     /// And red at this one.
     pub red_pct: f64,
+    /// Spread the budget over Monday to Friday instead of every day. Off by
+    /// default; weekend spend still counts in the month.
+    pub weekdays_only: bool,
 }
 
 impl Default for AccountSettings {
     fn default() -> Self {
-        AccountSettings { label: None, colour: None, hidden: false, monthly_budget_usd: 0.0, amber_pct: 80.0, red_pct: 100.0 }
+        AccountSettings { label: None, colour: None, hidden: false, monthly_budget_usd: 0.0, amber_pct: 80.0, red_pct: 100.0, weekdays_only: false }
     }
 }
 

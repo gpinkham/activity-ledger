@@ -507,12 +507,12 @@ pub fn gauge_view_for(state: &AppState, clock: &dyn Clock, poll: bool, account: 
             None => !hidden.iter().any(|h| h == a),
         })
     };
-    let (monthly, t) = match account {
+    let (monthly, t, weekdays_only) = match account {
         Some(id) => {
             let a = settings.account(id);
-            (a.monthly_budget_usd, Thresholds { amber: a.amber_pct / 100.0, red: a.red_pct / 100.0 })
+            (a.monthly_budget_usd, Thresholds { amber: a.amber_pct / 100.0, red: a.red_pct / 100.0 }, a.weekdays_only)
         }
-        None => (0.0, Thresholds::default()),
+        None => (0.0, Thresholds::default(), false),
     };
     let account_label = match account {
         Some(id) => accounts(state)?.into_iter().find(|a| a.id == id).map(|a| a.label),
@@ -520,7 +520,7 @@ pub fn gauge_view_for(state: &AppState, clock: &dyn Clock, poll: bool, account: 
     };
     Ok(GaugeView {
         day: spend.day.to_string(),
-        budget: budget::view(monthly, spend.day, spend.today, spend.month_to_date, t),
+        budget: budget::view_for(monthly, spend.day, spend.today, spend.month_to_date, t, weekdays_only),
         rate_source: prices.source(),
         account: account.map(str::to_string),
         account_label,
@@ -800,6 +800,30 @@ mod tests {
         state.settings.lock().unwrap().accounts.insert("acct:me:acme".into(), AccountSettings { hidden: true, ..Default::default() });
         assert!((cost(Filters::default()) - 5.0).abs() < 1e-9);
         assert!((cost(only("acct:me:acme")) - 25.0).abs() < 1e-9);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_account_set_to_weekdays_only_spreads_its_budget_over_monday_to_friday() {
+        let (dir, state) = two_accounts("weekdays");
+        let thursday = UtcDay(NaiveDate::from_ymd_opt(2026, 10, 1).unwrap());
+        let every_day = gauge_view(&state, &thursday, true).unwrap().budget;
+        assert!(!every_day.weekdays_only && every_day.days_in_month == 31, "off by default");
+
+        state.settings.lock().unwrap().accounts.get_mut(ME).unwrap().weekdays_only = true;
+        let b = gauge_view(&state, &thursday, false).unwrap().budget;
+        assert!(b.weekdays_only);
+        assert_eq!(b.days_in_month, 22, "October 2026 has 22 weekdays");
+        assert!((b.daily_allowance - 310.0 / 22.0).abs() < 1e-9);
+        assert_eq!(b.ring, budget::Ring::Green);
+
+        let saturday = UtcDay(NaiveDate::from_ymd_opt(2026, 10, 3).unwrap());
+        let b = gauge_view(&state, &saturday, false).unwrap().budget;
+        assert_eq!(b.ring, budget::Ring::Weekend);
+        assert!((b.month_to_date - 5.0).abs() < 1e-9, "Thursday's call still counts");
+
+        let all = gauge_view_for(&state, &saturday, false, None).unwrap().budget;
+        assert!(!all.weekdays_only, "all accounts has no budget to spread");
         fs::remove_dir_all(&dir).ok();
     }
 

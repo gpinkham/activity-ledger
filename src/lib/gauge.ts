@@ -27,12 +27,15 @@ export function rateNote(source: GaugeView["rate_source"]): string {
 }
 
 export function ringWord(ring: Ring): string {
-  return { none: "No budget set", green: "Within today's allowance", amber: "Near today's allowance", red: "Over today's allowance" }[ring];
+  return {
+    none: "No budget set", green: "Within today's allowance", amber: "Near today's allowance", red: "Over today's allowance",
+    weekend: "Weekend: counted in the month",
+  }[ring];
 }
 
 /** Text colour for a ring state. */
 export function ringClass(ring: Ring): string {
-  return { none: "text-muted", green: "text-emerald-500", amber: "text-amber-500", red: "text-red-500" }[ring];
+  return { none: "text-muted", green: "text-emerald-500", amber: "text-amber-500", red: "text-red-500", weekend: "text-muted" }[ring];
 }
 
 /** "$4.27 ahead of an even pace", "$3.10 under an even pace", or "On an even pace". */
@@ -43,8 +46,24 @@ export function paceLine(b: BudgetView): string {
 }
 
 export function remainingLine(b: BudgetView): string {
+  if (b.weekdays_only) {
+    if (b.days_left === 0) return "No weekdays left this month";
+    if (b.days_left === 1) return `${money(b.remaining_per_day)} for ${b.ring === "weekend" ? "the last weekday" : "today"}`;
+    return `${money(b.remaining_per_day)} for each of the ${b.days_left} weekdays left`;
+  }
   const days = b.days_left === 1 ? "today" : `each of the ${b.days_left} days left`;
   return `${money(b.remaining_per_day)} for ${days}`;
+}
+
+/** The projected month end, or "No weekday yet" before a weekdays-only month's first weekday. */
+export function projectedLine(b: BudgetView): string {
+  return b.no_weekday_yet ? "No weekday yet" : money(b.projected);
+}
+
+/** Under the figures on a weekdays-only budget: what the day counts mean. */
+export function weekdaysNote(b: BudgetView): string | null {
+  if (!b.weekdays_only) return null;
+  return `Spread over the ${b.days_in_month} weekdays this month, Monday to Friday. Weekend spend counts in the month.`;
 }
 
 /** Real work and overhead as whole percentages of today's spend. */

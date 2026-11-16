@@ -129,6 +129,11 @@ function AccountPanel({ account: a, all, onMove, onRemove, busy }: {
         </label>
       </div>
       <label className="mt-2 flex items-center gap-2 text-sm text-ink">
+        <input type="checkbox" data-weekdays-only checked={draft.weekdays_only ?? false}
+          onChange={(e) => set("weekdays_only", e.target.checked)} />
+        Weekdays only (spread the budget over Monday to Friday; weekend spend still counts)
+      </label>
+      <label className="mt-2 flex items-center gap-2 text-sm text-ink">
         <input type="checkbox" checked={draft.hidden} onChange={(e) => set("hidden", e.target.checked)} />
         Hide (left out of the picker and of All accounts)
       </label>

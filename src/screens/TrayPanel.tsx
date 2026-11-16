@@ -1,7 +1,7 @@
 // The menu bar gauge's panel, opened from the ring in the menu bar. Presentation
 // only: TrayApp loads the figures. Every figure is an estimate and says so.
 import type { GaugeView, WorkSplit } from "../lib/types";
-import { money, paceLine, rateNote, remainingLine, ringClass, ringWord, splitShares } from "../lib/gauge";
+import { money, paceLine, projectedLine, rateNote, remainingLine, ringClass, ringWord, splitShares, weekdaysNote } from "../lib/gauge";
 
 /** An account the panel can switch the ring to. */
 export interface PanelAccount { id: string; label: string; colour: string }
@@ -85,6 +85,9 @@ export function TrayPanel({ view, split, error, accounts, onPickAccount, onOpen,
   }
   const b = view.budget;
   const set = b.ring !== "none";
+  // A weekend on a weekdays-only budget: the dollars, with no allowance to hold them to.
+  const weekend = b.ring === "weekend";
+  const note = set ? weekdaysNote(b) : null;
   const shares = split ? splitShares(split.work_usd, split.overhead_usd) : null;
   return (
     <div className="p-4 text-sm flex flex-col gap-2" data-state={b.ring}>
@@ -93,19 +96,19 @@ export function TrayPanel({ view, split, error, accounts, onPickAccount, onOpen,
         <div className="text-xs text-muted">Today</div>
         <div className="text-2xl font-semibold text-ink tabular-nums">
           {money(b.today)}
-          {set && <span className="text-base font-normal text-muted"> of {money(b.daily_allowance)}</span>}
+          {set && !weekend && <span className="text-base font-normal text-muted"> of {money(b.daily_allowance)}</span>}
         </div>
         <div className={`text-xs ${ringClass(b.ring)}`} data-ring={b.ring}>
           {ringWord(b.ring)}
-          {set && ` (${Math.round(b.today_share * 100)}%)`}
+          {set && !weekend && ` (${Math.round(b.today_share * 100)}%)`}
         </div>
       </div>
 
       <div className="border-t border-line pt-1">
         <Row label="Month to date" value={set ? `${money(b.month_to_date)} of ${money(b.monthly_budget)}` : money(b.month_to_date)} />
         {set && <Row label="Pace" value={paceLine(b)} />}
-        <Row label="Projected month end" value={money(b.projected)}
-          className={set && b.projected > b.monthly_budget ? "text-red-500" : ""} />
+        <Row label="Projected month end" value={projectedLine(b)}
+          className={set && !b.no_weekday_yet && b.projected > b.monthly_budget ? "text-red-500" : ""} />
         {set && <Row label="Left per day" value={remainingLine(b)} />}
         <Row label="Today: work / overhead"
           value={split === null ? "working it out…" : shares ? `${shares.work}% / ${shares.overhead}%` : "no calls yet"} />
@@ -118,6 +121,7 @@ export function TrayPanel({ view, split, error, accounts, onPickAccount, onOpen,
             : "Every account together. Budgets are per account: pick one to see its ring."}
         </p>
       )}
+      {note && <p className="text-xs text-muted" data-weekdays>{note}</p>}
       {error && <p className="text-xs text-red-500">{error}</p>}
       <p className="text-xs text-muted" data-note>{rateNote(view.rate_source)}</p>
 
