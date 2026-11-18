@@ -8,6 +8,13 @@
 //! An account can spread its budget over Monday to Friday instead (off by
 //! default). Weekend spend still counts in the month to date; the weekend has no
 //! allowance of its own, so its ring is grey. Public holidays are not known.
+//!
+//! The ring measures today against what is left: the budget minus what was spent
+//! before today, spread over the days left with today included (`today_allowance`).
+//! It is fixed for the day, so spending today does not shrink its own target. The
+//! even spread (`daily_allowance`) stays for the pace line and the jump check. Once
+//! the budget was used up before today the ring is full red with no share
+//! (`used_up`) until the 1st.
 
 use chrono::{Datelike, Duration, NaiveDate};
 use serde::Serialize;
@@ -51,10 +58,18 @@ pub struct BudgetView {
     pub days_left: u32,
     /// Weekdays only, before the month's first weekday: there is no pace to project from.
     pub no_weekday_yet: bool,
-    /// The budget spread evenly over the month's days (or its weekdays).
+    /// The budget spread evenly over the month's days (or its weekdays). The pace
+    /// line and the jump check use it.
     pub daily_allowance: f64,
+    /// What the ring measures today against: the budget minus the spend before
+    /// today, over the days left (today included). Weekdays only, on a weekend, or
+    /// with the budget used up: the even spread, and it is not shown.
+    pub today_allowance: f64,
+    /// The budget was all spent before today: the ring is full red, with no share.
+    pub used_up: bool,
     pub today: f64,
-    /// Today's spend as a share of today's allowance (1.0 = all of it).
+    /// Today's spend as a share of today's allowance (1.0 = all of it). 0 when the
+    /// budget is used up, so it is never infinite.
     pub today_share: f64,
     pub month_to_date: f64,
     /// What an even pace would have spent by the end of today.
@@ -89,6 +104,22 @@ pub fn ring(share: f64, t: Thresholds) -> Ring {
     }
 }
 
+/// Less than half a cent left counts as nothing left. Sums of many small costs
+/// carry float error (a cent added 30,000 times is 299.99999999987), and a
+/// remainder like 1.3e-10 would make a cent spent today a share in the billions.
+pub const NOTHING_LEFT: f64 = 0.005;
+
+/// Today's allowance, whether the budget was used up before today, and today's
+/// share, for a day that has an allowance (`left` counts today, so it is at least 1).
+fn against_what_is_left(budget: f64, today_spent: f64, month_to_date: f64, left: u32, daily_allowance: f64) -> (f64, bool, f64) {
+    let left_before_today = budget - (month_to_date - today_spent).max(0.0);
+    if left_before_today < NOTHING_LEFT {
+        return (daily_allowance, true, 0.0);
+    }
+    let allowance = left_before_today / left as f64;
+    (allowance, false, today_spent / allowance)
+}
+
 /// The figures the panel shows. A budget of zero or less means "not set": the
 /// money figures are still reported, and the ring is `Ring::None`.
 pub fn view(monthly_budget: f64, today: NaiveDate, today_spent: f64, month_to_date: f64, t: Thresholds) -> BudgetView {
@@ -98,7 +129,8 @@ pub fn view(monthly_budget: f64, today: NaiveDate, today_spent: f64, month_to_da
     let set = monthly_budget > 0.0;
     let budget = if set { monthly_budget } else { 0.0 };
     let daily_allowance = budget / dim as f64;
-    let today_share = if set { today_spent / daily_allowance } else { 0.0 };
+    let (today_allowance, used_up, today_share) =
+        if set { against_what_is_left(budget, today_spent, month_to_date, left, daily_allowance) } else { (0.0, false, 0.0) };
     BudgetView {
         monthly_budget: budget,
         weekdays_only: false,
@@ -107,13 +139,19 @@ pub fn view(monthly_budget: f64, today: NaiveDate, today_spent: f64, month_to_da
         days_left: left,
         no_weekday_yet: false,
         daily_allowance,
+        today_allowance,
+        used_up,
         today: today_spent,
         today_share,
         month_to_date,
         on_pace: daily_allowance * elapsed as f64,
         projected: month_to_date / elapsed as f64 * dim as f64,
         remaining_per_day: ((budget - month_to_date) / left as f64).max(0.0),
-        ring: if set { ring(today_share, t) } else { Ring::None },
+        ring: match (set, used_up) {
+            (false, _) => Ring::None,
+            (true, true) => Ring::Red,
+            (true, false) => ring(today_share, t),
+        },
     }
 }
 
@@ -152,7 +190,13 @@ pub fn view_for(monthly_budget: f64, today: NaiveDate, today_spent: f64, month_t
     let budget = if set { monthly_budget } else { 0.0 };
     let daily_allowance = budget / in_month as f64;
     let weekend = !is_weekday(today);
-    let today_share = if set && !weekend { today_spent / daily_allowance } else { 0.0 };
+    // A weekday is in `left`, so there is no division by zero. A weekend has no
+    // allowance: its spend lowers the next weekday's instead.
+    let (today_allowance, used_up, today_share) = match (set, weekend) {
+        (false, _) => (0.0, false, 0.0),
+        (true, true) => (daily_allowance, false, 0.0),
+        (true, false) => against_what_is_left(budget, today_spent, month_to_date, left, daily_allowance),
+    };
     BudgetView {
         monthly_budget: budget,
         weekdays_only: true,
@@ -161,16 +205,19 @@ pub fn view_for(monthly_budget: f64, today: NaiveDate, today_spent: f64, month_t
         days_left: left,
         no_weekday_yet: elapsed == 0,
         daily_allowance,
+        today_allowance,
+        used_up,
         today: today_spent,
         today_share,
         month_to_date,
         on_pace: daily_allowance * elapsed as f64,
         projected: if elapsed == 0 { month_to_date } else { month_to_date / elapsed as f64 * in_month as f64 },
         remaining_per_day: if left == 0 { 0.0 } else { ((budget - month_to_date) / left as f64).max(0.0) },
-        ring: match (set, weekend) {
-            (false, _) => Ring::None,
-            (true, true) => Ring::Weekend,
-            (true, false) => ring(today_share, t),
+        ring: match (set, weekend, used_up) {
+            (false, _, _) => Ring::None,
+            (true, true, _) => Ring::Weekend,
+            (true, false, true) => Ring::Red,
+            (true, false, false) => ring(today_share, t),
         },
     }
 }
@@ -233,8 +280,8 @@ mod tests {
     #[test]
     fn the_ring_takes_a_thresholds_colour_at_the_threshold() {
         let t = Thresholds::default();
-        // A 31 day month: the allowance is 310 / 31 = 10.
-        let at = |spent: f64| view(310.0, d(2026, 10, 15), spent, 0.0, t).ring;
+        // The first day of a 31 day month: today's allowance is 310 / 31 = 10.
+        let at = |spent: f64| view(310.0, d(2026, 10, 1), spent, spent, t).ring;
         assert_eq!(at(7.9), Ring::Green, "79%");
         assert_eq!(at(8.0), Ring::Amber, "80%");
         assert_eq!(at(9.99), Ring::Amber, "99.9%");
@@ -307,7 +354,8 @@ mod tests {
         assert_eq!(cents(v.on_pace), 1100.0, "100 a weekday for 11 weekdays");
         assert_eq!(cents(v.projected), 1909.09, "1000 over 11 weekdays, times 21");
         assert_eq!(cents(v.remaining_per_day), 100.0, "1100 over 11 weekdays");
-        assert_eq!(cents(v.today_share), 0.5);
+        assert_eq!(cents(v.today_allowance), 104.55, "1150 left before today, over 11 weekdays");
+        assert_eq!(cents(v.today_share), 0.48);
         assert_eq!(v.ring, Ring::Green);
         assert!(!v.no_weekday_yet);
     }
@@ -330,7 +378,8 @@ mod tests {
     #[test]
     fn a_weekday_over_its_allowance_is_red_as_usual() {
         let t = Thresholds::default();
-        let at = |spent: f64| view_for(2100.0, d(2026, 11, 17), spent, 0.0, t, true).ring;
+        // Monday 2 November 2026, the month's first weekday: 2100 / 21 = 100.
+        let at = |spent: f64| view_for(2100.0, d(2026, 11, 2), spent, spent, t, true).ring;
         assert_eq!(at(79.0), Ring::Green);
         assert_eq!(at(80.0), Ring::Amber);
         assert_eq!(at(100.0), Ring::Red);
@@ -397,5 +446,147 @@ mod tests {
         assert_eq!((v.days_in_month, v.days_elapsed, v.days_left), (30, 1, 30));
         let w = view(300.0, d(2026, 3, 8), 0.0, 0.0, Thresholds::default());
         assert_eq!((w.days_in_month, w.days_elapsed, w.days_left), (31, 8, 24), "the 23 hour spring day");
+    }
+
+    // The worked examples in the spec (HAG-208): $300 in December 2026, 31 days,
+    // an even spread of $9.68.
+
+    #[test]
+    fn case_a_a_heavy_first_week_lowers_todays_allowance() {
+        // Day 8: $120 spent before today, $7 today.
+        let v = view(300.0, d(2026, 12, 8), 7.0, 127.0, Thresholds::default());
+        assert_eq!(cents(v.today_allowance), 7.5, "180 left over the 24 days left, today included");
+        assert_eq!(cents(v.today_share), 0.93);
+        assert_eq!(v.ring, Ring::Amber);
+        assert!(!v.used_up);
+        assert_eq!(cents(v.daily_allowance), 9.68, "the even spread is unchanged");
+        assert_eq!(cents(v.remaining_per_day), 7.21, "and so is what is left per day");
+    }
+
+    #[test]
+    fn spending_today_does_not_change_todays_allowance() {
+        for today in [0.0, 7.0, 20.0] {
+            let v = view(300.0, d(2026, 12, 8), today, 120.0 + today, Thresholds::default());
+            assert_eq!(cents(v.today_allowance), 7.5, "${today} today");
+        }
+    }
+
+    #[test]
+    fn case_b_a_budget_used_up_before_today_is_full_red_with_no_share() {
+        // Day 20: $310 spent before today, $5 today.
+        let v = view(300.0, d(2026, 12, 20), 5.0, 315.0, Thresholds::default());
+        assert!(v.used_up);
+        assert_eq!(v.ring, Ring::Red);
+        assert_eq!(v.today_share, 0.0, "no share at all");
+        assert!(v.today_share.is_finite() && v.today_allowance.is_finite());
+        assert_eq!(v.remaining_per_day, 0.0);
+        assert_eq!(cents(v.projected), 488.25, "already red in every version");
+        let exact = view(300.0, d(2026, 12, 20), 0.0, 300.0, Thresholds::default());
+        assert!(exact.used_up, "exactly all of it, before today, is used up too");
+        assert_eq!(exact.today_share, 0.0);
+        let light = view(300.0, d(2026, 12, 20), 0.0, 310.0, Thresholds::default());
+        assert_eq!((light.ring, light.used_up), (Ring::Red, true), "a day with nothing spent is still red");
+    }
+
+    #[test]
+    fn under_half_a_cent_left_before_today_is_used_up() {
+        let summed: f64 = (0..30_000).map(|_| 0.01).sum();
+        assert!(summed < 300.0, "the float sum falls just short: {summed}");
+        let v = view(300.0, d(2026, 12, 20), 0.01, summed + 0.01, Thresholds::default());
+        assert!(v.used_up, "a remainder of {} is nothing left", 300.0 - summed);
+        assert_eq!((v.ring, v.today_share), (Ring::Red, 0.0));
+        let close = view(300.0, d(2026, 12, 20), 0.01, 299.999 + 0.01, Thresholds::default());
+        assert!(close.used_up, "a tenth of a cent left");
+        let cent = view(300.0, d(2026, 12, 20), 0.0, 299.99, Thresholds::default());
+        assert!(!cent.used_up, "a whole cent is still something left");
+        assert!(cent.today_share.is_finite());
+    }
+
+    #[test]
+    fn crossing_the_budget_during_today_is_ordinary_red_with_a_share() {
+        // $295 spent before today, $10 today: $5 was left over 12 days.
+        let v = view(300.0, d(2026, 12, 20), 10.0, 305.0, Thresholds::default());
+        assert!(!v.used_up);
+        assert_eq!(v.ring, Ring::Red);
+        assert_eq!(cents(v.today_allowance), 0.42);
+        assert_eq!(v.today_share.round(), 24.0, "10 over 5 / 12");
+    }
+
+    #[test]
+    fn the_first_day_is_the_even_spread_and_the_last_day_is_all_that_is_left() {
+        let first = view(300.0, d(2026, 12, 1), 3.0, 3.0, Thresholds::default());
+        assert_eq!(first.today_allowance, first.daily_allowance);
+        let last = view(300.0, d(2026, 12, 31), 12.0, 272.0, Thresholds::default());
+        assert_eq!(cents(last.today_allowance), 40.0, "$40 was left this morning");
+        assert_eq!(cents(last.today_share), 0.3);
+    }
+
+    #[test]
+    fn underspending_early_raises_todays_allowance_with_no_cap() {
+        // $20 spent by the end of day 10.
+        let v = view(300.0, d(2026, 12, 11), 0.0, 20.0, Thresholds::default());
+        assert_eq!(cents(v.today_allowance), 13.33, "280 over 21 days");
+        assert_eq!(cents(v.daily_allowance), 9.68);
+    }
+
+    #[test]
+    fn weekdays_only_measures_a_weekday_against_what_is_left_over_the_weekdays_left() {
+        // December 2026: 23 weekdays, an even 13.04. Tuesday the 8th is the 6th
+        // weekday, with 18 left counting today.
+        let v = wk(300.0, d(2026, 12, 8), 4.0, 104.0);
+        assert_eq!(cents(v.daily_allowance), 13.04);
+        assert_eq!(v.days_left, 18);
+        assert_eq!(cents(v.today_allowance), 11.11, "200 left before today over 18 weekdays");
+        assert_eq!(v.ring, Ring::Green);
+    }
+
+    #[test]
+    fn weekend_spend_keeps_a_grey_ring_and_lowers_mondays_allowance() {
+        // Saturday 12 December: $30 on the weekend after $100 by Friday.
+        let sat = wk(300.0, d(2026, 12, 12), 30.0, 130.0);
+        assert_eq!(sat.ring, Ring::Weekend);
+        assert!(!sat.used_up);
+        assert_eq!(sat.today_share, 0.0);
+        // Monday the 14th: 14 weekdays left, today included.
+        let monday = wk(300.0, d(2026, 12, 14), 0.0, 130.0);
+        assert_eq!(cents(monday.today_allowance), 12.14, "170 over 14, lowered by the weekend");
+        let quiet = wk(300.0, d(2026, 12, 14), 0.0, 100.0);
+        assert!(monday.today_allowance < quiet.today_allowance);
+        let over = wk(300.0, d(2026, 12, 12), 50.0, 320.0);
+        assert_eq!((over.ring, over.used_up), (Ring::Weekend, false), "a weekend stays grey even over budget");
+    }
+
+    #[test]
+    fn no_weekday_yet_stays_grey_and_the_first_weekday_spreads_over_all_of_them() {
+        // August 2026 starts on a Saturday; $45 spent on the weekend.
+        let sat = wk(2100.0, d(2026, 8, 1), 30.0, 45.0);
+        assert_eq!(sat.ring, Ring::Weekend);
+        let monday = wk(2100.0, d(2026, 8, 3), 0.0, 45.0);
+        assert_eq!(cents(monday.today_allowance), 97.86, "2055 over all 21 weekdays");
+    }
+
+    #[test]
+    fn a_weekend_after_the_last_weekday_never_divides() {
+        // Saturday 31 October 2026: no weekdays left.
+        let v = wk(2200.0, d(2026, 10, 31), 10.0, 1800.0);
+        assert_eq!(v.days_left, 0);
+        assert_eq!(v.ring, Ring::Weekend);
+        assert!(v.today_allowance.is_finite() && v.today_share.is_finite());
+        let spent = wk(2200.0, d(2026, 10, 31), 10.0, 2300.0);
+        assert_eq!((spent.ring, spent.used_up), (Ring::Weekend, false));
+    }
+
+    #[test]
+    fn a_weekday_with_the_budget_used_up_is_full_red_with_no_share() {
+        let v = wk(300.0, d(2026, 12, 14), 2.0, 302.0);
+        assert_eq!((v.ring, v.used_up, v.today_share), (Ring::Red, true, 0.0));
+    }
+
+    #[test]
+    fn no_budget_has_no_allowance_of_either_kind() {
+        let v = view(0.0, d(2026, 12, 8), 7.0, 127.0, Thresholds::default());
+        assert_eq!((v.ring, v.today_allowance, v.used_up), (Ring::None, 0.0, false));
+        let w = wk(0.0, d(2026, 12, 8), 7.0, 127.0);
+        assert_eq!((w.ring, w.today_allowance, w.used_up), (Ring::None, 0.0, false));
     }
 }

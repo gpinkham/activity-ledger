@@ -97,6 +97,11 @@ export interface BudgetView {
   weekdays_only?: boolean; no_weekday_yet?: boolean;
   monthly_budget: number; days_in_month: number; days_elapsed: number; days_left: number;
   daily_allowance: number; today: number; today_share: number; month_to_date: number;
+  /** What the ring measures today against: what is left over the days left, today
+   *  included. Absent from an older backend: the even spread, daily_allowance. */
+  today_allowance?: number;
+  /** The month's budget was all spent before today: full red, with no share. */
+  used_up?: boolean;
   on_pace: number; projected: number; remaining_per_day: number; ring: Ring;
 }
 /** Today, or the last 3 days, well above a usual day (see src-tauri/src/jump.rs). */
