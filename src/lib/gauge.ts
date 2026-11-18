@@ -33,6 +33,9 @@ export function ringWord(ring: Ring): string {
   }[ring];
 }
 
+/** Less than half a cent left is nothing left, as in budget.rs (NOTHING_LEFT). */
+const nothingLeft = (b: BudgetView) => b.monthly_budget - b.month_to_date < 0.005;
+
 /** What today is measured against: what is left, or the even spread from an older backend. */
 export const todayAllowance = (b: BudgetView): number => b.today_allowance ?? b.daily_allowance;
 
@@ -80,11 +83,11 @@ export function jumpLine(j: Jump): string {
 export function remainingLine(b: BudgetView): string {
   if (b.weekdays_only) {
     if (b.days_left === 0) return "No weekdays left this month";
-    if (b.month_to_date >= b.monthly_budget) return "Nothing left this month";
+    if (nothingLeft(b)) return "Nothing left this month";
     if (b.days_left === 1) return `${money(b.remaining_per_day)} for ${b.ring === "weekend" ? "the last weekday" : "today"}`;
     return `${money(b.remaining_per_day)} for each of the ${b.days_left} weekdays left`;
   }
-  if (b.month_to_date >= b.monthly_budget) return "Nothing left this month";
+  if (nothingLeft(b)) return "Nothing left this month";
   const days = b.days_left === 1 ? "today" : `each of the ${b.days_left} days left`;
   return `${money(b.remaining_per_day)} for ${days}`;
 }

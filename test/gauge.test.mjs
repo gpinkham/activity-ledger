@@ -218,6 +218,8 @@ test("weekdays only: the weekend and no-weekday-yet renders are unchanged, and n
   const first = wk({ ring: "weekend", no_weekday_yet: true, today_share: 0, days_left: 21, today_allowance: 100, daily_allowance: 100 });
   assert.match(html({ view: view(first), split: null }), /No weekday yet/);
   assert.equal(G.remainingLine(wk({ month_to_date: 320, monthly_budget: 300, remaining_per_day: 0 })), "Nothing left this month");
+  assert.equal(G.remainingLine(budget({ month_to_date: 299.999, monthly_budget: 300, remaining_per_day: 0 })), "Nothing left this month", "a tenth of a cent is nothing left");
+  assert.equal(G.remainingLine(budget({ month_to_date: 299.99, monthly_budget: 300, remaining_per_day: 0.01 / 17 })), "$0.00 for each of the 17 days left", "a whole cent is not");
   assert.equal(G.remainingLine(wk({ days_left: 0, month_to_date: 320, monthly_budget: 300, remaining_per_day: 0 })), "No weekdays left this month", "kept");
 });
 

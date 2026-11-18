@@ -104,11 +104,16 @@ pub fn ring(share: f64, t: Thresholds) -> Ring {
     }
 }
 
+/// Less than half a cent left counts as nothing left. Sums of many small costs
+/// carry float error (a cent added 30,000 times is 299.99999999987), and a
+/// remainder like 1.3e-10 would make a cent spent today a share in the billions.
+pub const NOTHING_LEFT: f64 = 0.005;
+
 /// Today's allowance, whether the budget was used up before today, and today's
 /// share, for a day that has an allowance (`left` counts today, so it is at least 1).
 fn against_what_is_left(budget: f64, today_spent: f64, month_to_date: f64, left: u32, daily_allowance: f64) -> (f64, bool, f64) {
     let left_before_today = budget - (month_to_date - today_spent).max(0.0);
-    if left_before_today <= 0.0 {
+    if left_before_today < NOTHING_LEFT {
         return (daily_allowance, true, 0.0);
     }
     let allowance = left_before_today / left as f64;
@@ -481,6 +486,20 @@ mod tests {
         assert_eq!(exact.today_share, 0.0);
         let light = view(300.0, d(2026, 12, 20), 0.0, 310.0, Thresholds::default());
         assert_eq!((light.ring, light.used_up), (Ring::Red, true), "a day with nothing spent is still red");
+    }
+
+    #[test]
+    fn under_half_a_cent_left_before_today_is_used_up() {
+        let summed: f64 = (0..30_000).map(|_| 0.01).sum();
+        assert!(summed < 300.0, "the float sum falls just short: {summed}");
+        let v = view(300.0, d(2026, 12, 20), 0.01, summed + 0.01, Thresholds::default());
+        assert!(v.used_up, "a remainder of {} is nothing left", 300.0 - summed);
+        assert_eq!((v.ring, v.today_share), (Ring::Red, 0.0));
+        let close = view(300.0, d(2026, 12, 20), 0.01, 299.999 + 0.01, Thresholds::default());
+        assert!(close.used_up, "a tenth of a cent left");
+        let cent = view(300.0, d(2026, 12, 20), 0.0, 299.99, Thresholds::default());
+        assert!(!cent.used_up, "a whole cent is still something left");
+        assert!(cent.today_share.is_finite());
     }
 
     #[test]
