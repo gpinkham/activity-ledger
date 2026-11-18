@@ -13,7 +13,7 @@
 //! both back. Every 60 seconds a poll reads what the transcripts gained (gauge.rs)
 //! and redraws the ring. Nothing here opens a network connection.
 
-use crate::budget::Ring;
+use crate::budget::{BudgetView, Ring};
 use crate::commands::{gauge_view, AppState};
 use crate::gauge::SystemClock;
 use std::sync::Mutex;
@@ -73,20 +73,30 @@ pub fn ring_rgba(ring: Ring, share: f64) -> Vec<u8> {
     px
 }
 
-/// "Today $4.10 of $9.68 (42%)", or the spend alone when no budget is set, for
-/// the account the ring follows, or for all of them when `account` is none.
-pub fn tooltip(today: f64, allowance: f64, ring: Ring, account: Option<&str>) -> String {
+/// How much of the ring to fill: the share of today's allowance, and all of it once
+/// the month's budget was used up before today.
+pub fn icon_share(b: &BudgetView) -> f64 {
+    if b.used_up { 1.0 } else { b.today_share }
+}
+
+/// "Today $4.10 of $9.68 (42%)" against today's allowance, the month's budget once
+/// it is used up, or the spend alone when no budget is set, for the account the
+/// ring follows, or for all of them when `account` is none.
+pub fn tooltip(b: &BudgetView, account: Option<&str>) -> String {
     let who = match account {
         Some(a) => format!("Activity Ledger · {a}"),
         None => "Activity Ledger · all accounts".to_string(),
     };
-    if ring == Ring::None {
+    let today = b.today;
+    if b.ring == Ring::None {
         let why = if account.is_some() { "no budget set" } else { "budgets are per account" };
         format!("{who}: today ${today:.2} ({why})")
-    } else if ring == Ring::Weekend {
+    } else if b.ring == Ring::Weekend {
         format!("{who}: weekend ${today:.2} (counted in the month)")
+    } else if b.used_up {
+        format!("{who}: month budget used, ${:.2} of ${:.2}", b.month_to_date, b.monthly_budget)
     } else {
-        format!("{who}: today ${today:.2} of ${allowance:.2} ({:.0}%)", today / allowance * 100.0)
+        format!("{who}: today ${today:.2} of ${:.2} ({:.0}%)", b.today_allowance, b.today_share * 100.0)
     }
 }
 
@@ -96,9 +106,9 @@ pub fn refresh_icon(app: &AppHandle) {
     let state = app.state::<AppState>();
     let Ok(v) = gauge_view(&state, &SystemClock, true) else { return };
     let b = &v.budget;
-    let _ = tray.set_icon(Some(Image::new_owned(ring_rgba(b.ring, b.today_share), ICON, ICON)));
+    let _ = tray.set_icon(Some(Image::new_owned(ring_rgba(b.ring, icon_share(b)), ICON, ICON)));
     let who = v.account_label.as_deref().or(v.account.as_deref());
-    let _ = tray.set_tooltip(Some(tooltip(b.today, b.daily_allowance, b.ring, who)));
+    let _ = tray.set_tooltip(Some(tooltip(b, who)));
 }
 
 /// Show the main window and put the app back in the Dock.
@@ -428,11 +438,47 @@ mod tests {
         assert_eq!(ring_rgba(Ring::Weekend, 3.0), ring_rgba(Ring::None, 0.0));
     }
 
+    fn day(y: i32, m: u32, d: u32) -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+    fn calendar(budget: f64, on: chrono::NaiveDate, today: f64, month_to_date: f64) -> BudgetView {
+        crate::budget::view(budget, on, today, month_to_date, crate::budget::Thresholds::default())
+    }
+    fn weekdays(budget: f64, on: chrono::NaiveDate, today: f64, month_to_date: f64) -> BudgetView {
+        crate::budget::view_for(budget, on, today, month_to_date, crate::budget::Thresholds::default(), true)
+    }
+
     #[test]
     fn the_tooltip_says_the_share_or_that_no_budget_is_set() {
-        assert_eq!(tooltip(4.1, 9.677, Ring::Green, Some("Acme")), "Activity Ledger · Acme: today $4.10 of $9.68 (42%)");
-        assert_eq!(tooltip(4.1, 0.0, Ring::None, Some("Personal")), "Activity Ledger · Personal: today $4.10 (no budget set)");
-        assert_eq!(tooltip(6.0, 0.0, Ring::None, None), "Activity Ledger · all accounts: today $6.00 (budgets are per account)");
-        assert_eq!(tooltip(12.0, 100.0, Ring::Weekend, Some("Acme")), "Activity Ledger · Acme: weekend $12.00 (counted in the month)");
+        // The first day of a 31 day month: today's allowance is the even 9.68.
+        let first = calendar(300.0, day(2026, 12, 1), 4.1, 4.1);
+        assert_eq!(tooltip(&first, Some("Acme")), "Activity Ledger · Acme: today $4.10 of $9.68 (42%)");
+        let none = calendar(0.0, day(2026, 12, 1), 4.1, 4.1);
+        assert_eq!(tooltip(&none, Some("Personal")), "Activity Ledger · Personal: today $4.10 (no budget set)");
+        let all = calendar(0.0, day(2026, 12, 1), 6.0, 6.0);
+        assert_eq!(tooltip(&all, None), "Activity Ledger · all accounts: today $6.00 (budgets are per account)");
+        let weekend = weekdays(2100.0, day(2026, 11, 21), 12.0, 1500.0);
+        assert_eq!(tooltip(&weekend, Some("Acme")), "Activity Ledger · Acme: weekend $12.00 (counted in the month)");
+    }
+
+    #[test]
+    fn the_tooltip_measures_today_against_what_is_left() {
+        // Case A: $120 before today in December, day 8, $7 today: $7.50, not $9.68.
+        let a = calendar(300.0, day(2026, 12, 8), 7.0, 127.0);
+        assert_eq!(tooltip(&a, Some("Acme")), "Activity Ledger · Acme: today $7.00 of $7.50 (93%)");
+    }
+
+    #[test]
+    fn a_used_up_budget_has_a_full_red_icon_and_no_percentage_in_the_tooltip() {
+        // Case B: $310 before today, $5 today.
+        let b = calendar(300.0, day(2026, 12, 20), 5.0, 315.0);
+        assert_eq!(tooltip(&b, Some("Acme")), "Activity Ledger · Acme: month budget used, $315.00 of $300.00");
+        assert!(!tooltip(&b, None).contains('%'));
+        assert_eq!(icon_share(&b), 1.0);
+        let px = ring_rgba(b.ring, icon_share(&b));
+        assert_eq!(px, ring_rgba(Ring::Red, 1.0), "the whole ring, red");
+        assert_eq!(&pixel(&px, 6, 22)[..3], &colour(Ring::Red));
+        let a = calendar(300.0, day(2026, 12, 8), 7.0, 127.0);
+        assert_eq!(icon_share(&a), a.today_share, "otherwise the share of today's allowance");
     }
 }

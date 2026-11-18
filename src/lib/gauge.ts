@@ -33,6 +33,27 @@ export function ringWord(ring: Ring): string {
   }[ring];
 }
 
+/** What today is measured against: what is left, or the even spread from an older backend. */
+export const todayAllowance = (b: BudgetView): number => b.today_allowance ?? b.daily_allowance;
+
+/** The ring's words under today's spend. "Within today's allowance (42%)", or with
+ *  the budget used up before today, "Month budget used: $315.00 of $300.00" and no share. */
+export function ringLine(b: BudgetView): string {
+  if (b.used_up) return `Month budget used: ${money(b.month_to_date)} of ${money(b.monthly_budget)}`;
+  if (b.ring === "none" || b.ring === "weekend") return ringWord(b.ring);
+  return `${ringWord(b.ring)} (${Math.round(b.today_share * 100)}%)`;
+}
+
+/** The grey note under today's allowance when it differs from the even spread by 5%
+ *  or more: "Even spread $9.68, lowered by the month so far". Otherwise null, so a
+ *  normal month shows one number. */
+export function allowanceNote(b: BudgetView): string | null {
+  if (b.ring === "none" || b.ring === "weekend" || b.used_up || b.daily_allowance <= 0) return null;
+  const today = todayAllowance(b);
+  if (Math.abs(today - b.daily_allowance) / b.daily_allowance < 0.05) return null;
+  return `Even spread ${money(b.daily_allowance)}, ${today < b.daily_allowance ? "lowered" : "raised"} by the month so far`;
+}
+
 /** Text colour for a ring state. */
 export function ringClass(ring: Ring): string {
   return { none: "text-muted", green: "text-emerald-500", amber: "text-amber-500", red: "text-red-500", weekend: "text-muted" }[ring];
@@ -59,9 +80,11 @@ export function jumpLine(j: Jump): string {
 export function remainingLine(b: BudgetView): string {
   if (b.weekdays_only) {
     if (b.days_left === 0) return "No weekdays left this month";
+    if (b.month_to_date >= b.monthly_budget) return "Nothing left this month";
     if (b.days_left === 1) return `${money(b.remaining_per_day)} for ${b.ring === "weekend" ? "the last weekday" : "today"}`;
     return `${money(b.remaining_per_day)} for each of the ${b.days_left} weekdays left`;
   }
+  if (b.month_to_date >= b.monthly_budget) return "Nothing left this month";
   const days = b.days_left === 1 ? "today" : `each of the ${b.days_left} days left`;
   return `${money(b.remaining_per_day)} for ${days}`;
 }

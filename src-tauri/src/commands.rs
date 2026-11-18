@@ -909,6 +909,34 @@ mod tests {
     }
 
     #[test]
+    fn the_jump_margin_stays_on_the_even_spread_when_todays_allowance_differs() {
+        // $5 a day from 3 to 9 October 2026, then $8 on Saturday the 10th, on a
+        // calendar budget of 310 (an even 10 a day).
+        let dir = std::env::temp_dir().join(format!("ci_jump_even_spread_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let proj = dir.join("home").join(".claude").join("projects").join("-home-me-app");
+        fs::create_dir_all(&proj).unwrap();
+        let call = |id: String, day: u32, input: i64| {
+            format!(r#"{{"type":"assistant","sessionId":"s","timestamp":"2026-10-{day:02}T10:00:00.000Z","message":{{"id":"{id}","role":"assistant","model":"claude-opus-4-8","usage":{{"input_tokens":{input}}}}}}}"#) + "\n"
+        };
+        let mut lines: String = (3..=9).map(|d| call(format!("d{d}"), d, 1_000_000)).collect();
+        lines += &call("today".into(), 10, 1_600_000);
+        fs::write(proj.join("a.jsonl"), lines).unwrap();
+        let state = state_for(&dir.join("home").join(".claude").join("projects"), &dir.join("data"), "");
+        let v = gauge_view(&state, &UtcDay(NaiveDate::from_ymd_opt(2026, 10, 10).unwrap()), true).unwrap();
+        fs::remove_dir_all(&dir).ok();
+
+        // Only $35 went before today, so today's allowance is raised to 275 / 22 = 12.50,
+        // a margin of 3.125. The even spread's margin is 2.50.
+        assert!((v.budget.daily_allowance - 10.0).abs() < 1e-9);
+        assert!((v.budget.today_allowance - 12.5).abs() < 1e-9);
+        // $8 is 1.6 times the usual $5 and $3 above it: a jump by the even spread's
+        // margin, which it would not be by today's allowance.
+        let j = v.jump.expect("the margin is a quarter of the even spread, not of today's allowance");
+        assert_eq!(j.kind, jump::JumpKind::Today);
+    }
+
+    #[test]
     fn the_ring_follows_one_accounts_budget_and_all_accounts_has_none() {
         let (dir, state) = two_accounts("ring");
         let clock = UtcDay(NaiveDate::from_ymd_opt(2026, 10, 1).unwrap());

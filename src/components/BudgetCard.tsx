@@ -64,7 +64,7 @@ export function BudgetCard() {
       <div className="mt-3 text-xs text-muted leading-relaxed">
         <p>Each account has its own budget and thresholds, set below under Accounts. {followed
           ? budget > 0
-            ? `${followed.label}'s allowance is its budget spread evenly over the calendar month, about $${(budget / 30.4).toFixed(2)} a day.`
+            ? `${followed.label}'s budget spread evenly over the calendar month is about $${(budget / 30.4).toFixed(2)} a day. The ring measures each day against what is left of the month's budget, spread over the days left.`
             : `${followed.label} has no budget yet, so the ring stays grey.`
           : "With all accounts the ring has no budget to measure against: the panel shows their spend together."} Days start at local midnight. The panel can switch accounts too.</p>
         <p>With the {words.bar} on, closing this window keeps Activity Ledger in the {words.bar}, out of the {words.dock}. Click the ring for today&apos;s figures, with buttons to reopen this window or quit.</p>

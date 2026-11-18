@@ -161,10 +161,64 @@ test("each ring state renders its colour, its words and the estimate note", () =
 });
 
 test("over budget the projection shows red and nothing is left per day", () => {
-  const h = html({ view: view(budget({ ring: "red", projected: 420, remaining_per_day: 0 })), split: null });
+  const h = html({ view: view(budget({ ring: "red", projected: 420, month_to_date: 305, remaining_per_day: 0 })), split: null });
   assert.match(h, /tabular-nums text-red-500">\$420\.00/);
-  assert.ok(h.includes("$0.00 for each of the 17 days left"));
+  assert.ok(h.includes("Nothing left this month"), "not $0.00 for each of the days left");
+  assert.ok(!h.includes("$0.00 for each"));
   assert.ok(h.includes("working it out"), "the split is still loading");
+});
+
+// The worked examples in the spec (HAG-208): $300 in December 2026, an even $9.68.
+const december = (over = {}) => budget({ days_in_month: 31, days_elapsed: 8, days_left: 24, daily_allowance: 300 / 31, ...over });
+
+test("case A: the ring is measured against what is left, with a grey note", () => {
+  const b = december({ today: 7, today_allowance: 7.5, today_share: 7 / 7.5, month_to_date: 127, remaining_per_day: 173 / 24, ring: "amber" });
+  const h = html({ view: view(b), split: null });
+  assert.ok(h.includes("$7.00") && h.includes("of $7.50"), "today of today's allowance");
+  assert.ok(!h.includes("of $9.68"), "not of the even spread");
+  assert.ok(h.includes("Near today&#x27;s allowance (93%)"));
+  assert.match(h, /data-allowance-note[^>]*>Even spread \$9\.68, lowered by the month so far</);
+  assert.ok(h.includes("$7.21 for each of the 24 days left"), "left per day is unchanged");
+  assert.equal(G.allowanceNote(december({ today_allowance: 280 / 21 })), "Even spread $9.68, raised by the month so far");
+});
+
+test("the grey note shows only when the two allowances differ by 5% or more", () => {
+  const even = 300 / 31;
+  assert.equal(G.allowanceNote(december({ today_allowance: even })), null, "the same: one number");
+  assert.equal(G.allowanceNote(december({ today_allowance: even * 0.96 })), null, "4% under");
+  assert.equal(G.allowanceNote(december({ today_allowance: even * 1.049 })), null, "4.9% over");
+  assert.match(G.allowanceNote(december({ today_allowance: even * 0.95 })), /lowered/, "5% under");
+  assert.match(G.allowanceNote(december({ today_allowance: even * 1.05 })), /raised/, "5% over");
+  assert.equal(G.allowanceNote(december({ today_allowance: 5, ring: "weekend" })), null, "no note on a weekend");
+  assert.equal(G.allowanceNote(december({ today_allowance: 0, ring: "none", daily_allowance: 0 })), null, "nor with no budget");
+  assert.equal(G.allowanceNote(budget()), null, "an older backend with no today_allowance: no note");
+  assert.ok(!html({ view: view(december({ today_allowance: even })), split: null }).includes("data-allowance-note"));
+  assert.ok(html({ view: view(budget()), split: null }).includes("of $9.68"), "an older backend: the even spread");
+});
+
+test("case B: a budget used up before today is full red with no percentage", () => {
+  const b = december({ days_elapsed: 20, days_left: 12, today: 5, today_share: 0, today_allowance: 300 / 31, used_up: true,
+    month_to_date: 315, remaining_per_day: 0, projected: 488.25, ring: "red" });
+  const h = html({ view: view(b), split: null });
+  assert.match(h, /data-ring="red" data-used-up=""[^>]*>Month budget used: \$315\.00 of \$300\.00</);
+  assert.ok(!/data-ring="red"[^>]*>[^<]*%/.test(h), "no percentage");
+  assert.ok(!h.includes(" of $9.68"), "and no allowance after today's spend");
+  assert.ok(!h.includes("data-allowance-note"));
+  assert.ok(h.includes("Nothing left this month"));
+  assert.match(h, /tabular-nums text-red-500">\$488\.25/, "the projection is red as before");
+  assert.equal(G.ringLine(b), "Month budget used: $315.00 of $300.00");
+});
+
+test("weekdays only: the weekend and no-weekday-yet renders are unchanged, and nothing left reads the same", () => {
+  const wk = (over = {}) => budget({ weekdays_only: true, days_in_month: 23, days_left: 14, remaining_per_day: 12.14, ...over });
+  const weekend = wk({ ring: "weekend", today: 30, today_share: 0, today_allowance: 300 / 23, daily_allowance: 300 / 23 });
+  const h = html({ view: view(weekend), split: null });
+  assert.match(h, /data-ring="weekend"[^>]*>Weekend: counted in the month</);
+  assert.ok(!h.includes("data-allowance-note") && !/\$30\.00<span[^>]*> of /.test(h));
+  const first = wk({ ring: "weekend", no_weekday_yet: true, today_share: 0, days_left: 21, today_allowance: 100, daily_allowance: 100 });
+  assert.match(html({ view: view(first), split: null }), /No weekday yet/);
+  assert.equal(G.remainingLine(wk({ month_to_date: 320, monthly_budget: 300, remaining_per_day: 0 })), "Nothing left this month");
+  assert.equal(G.remainingLine(wk({ days_left: 0, month_to_date: 320, monthly_budget: 300, remaining_per_day: 0 })), "No weekdays left this month", "kept");
 });
 
 test("with no budget the panel shows the spend, no ring colour, and where to set one", () => {

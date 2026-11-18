@@ -1,7 +1,7 @@
 // The menu bar gauge's panel, opened from the ring in the menu bar. Presentation
 // only: TrayApp loads the figures. Every figure is an estimate and says so.
 import type { GaugeView, WorkSplit } from "../lib/types";
-import { jumpLine, money, paceLine, projectedLine, rateNote, remainingLine, ringClass, ringWord, splitShares, weekdaysNote } from "../lib/gauge";
+import { allowanceNote, jumpLine, money, paceLine, projectedLine, rateNote, remainingLine, ringClass, ringLine, splitShares, todayAllowance, weekdaysNote } from "../lib/gauge";
 
 /** An account the panel can switch the ring to. */
 export interface PanelAccount { id: string; label: string; colour: string }
@@ -87,6 +87,9 @@ export function TrayPanel({ view, split, error, accounts, onPickAccount, onOpen,
   const set = b.ring !== "none";
   // A weekend on a weekdays-only budget: the dollars, with no allowance to hold them to.
   const weekend = b.ring === "weekend";
+  // The budget was all spent before today: no allowance for today, and no share.
+  const usedUp = set && !!b.used_up;
+  const lowered = allowanceNote(b);
   const note = set ? weekdaysNote(b) : null;
   const shares = split ? splitShares(split.work_usd, split.overhead_usd) : null;
   return (
@@ -96,12 +99,12 @@ export function TrayPanel({ view, split, error, accounts, onPickAccount, onOpen,
         <div className="text-xs text-muted">Today</div>
         <div className="text-2xl font-semibold text-ink tabular-nums">
           {money(b.today)}
-          {set && !weekend && <span className="text-base font-normal text-muted"> of {money(b.daily_allowance)}</span>}
+          {set && !weekend && !usedUp && <span className="text-base font-normal text-muted"> of {money(todayAllowance(b))}</span>}
         </div>
-        <div className={`text-xs ${ringClass(b.ring)}`} data-ring={b.ring}>
-          {ringWord(b.ring)}
-          {set && !weekend && ` (${Math.round(b.today_share * 100)}%)`}
+        <div className={`text-xs ${ringClass(b.ring)}`} data-ring={b.ring} {...(usedUp ? { "data-used-up": "" } : {})}>
+          {ringLine(b)}
         </div>
+        {lowered && <div className="text-xs text-muted" data-allowance-note>{lowered}</div>}
       </div>
 
       <div className="border-t border-line pt-1">
